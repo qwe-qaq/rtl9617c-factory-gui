@@ -18,9 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (lib)
+        run: cargo test --locked --lib
       - run: cargo build --release --locked
       - name: Package
-        run: Compress-Archive -Path target/release/rtl9617c-factory.exe,target/release/rtl9617c-factory-gui.exe -DestinationPath rtl9617c-factory-windows-x86_64.zip
+        run: Compress-Archive -Path target/release/rtl9617c-factory.exe,target/release/rtl9617c-factory-gui.exe,target/release/rtl9617c-factory-inspect.exe -DestinationPath rtl9617c-factory-windows-x86_64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: rtl9617c-factory-windows-x86_64
@@ -34,7 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked
       - name: Package
-        run: tar -C target/release -czf rtl9617c-factory-macos-aarch64.tar.gz rtl9617c-factory rtl9617c-factory-gui
+        run: tar -C target/release -czf rtl9617c-factory-macos-aarch64.tar.gz rtl9617c-factory rtl9617c-factory-gui rtl9617c-factory-inspect
       - uses: actions/upload-artifact@v4
         with:
           name: rtl9617c-factory-macos-aarch64
@@ -58,8 +60,8 @@ jobs:
         run: cargo build --release --locked --features linux-x11
       - name: Package
         run: |
-          cp target/release/rtl9617c-factory target/release/rtl9617c-factory-gui .
-          tar -czf rtl9617c-factory-linux-x86_64.tar.gz rtl9617c-factory rtl9617c-factory-gui
+          cp target/release/rtl9617c-factory target/release/rtl9617c-factory-gui target/release/rtl9617c-factory-inspect .
+          tar -czf rtl9617c-factory-linux-x86_64.tar.gz rtl9617c-factory rtl9617c-factory-gui rtl9617c-factory-inspect
       - uses: actions/upload-artifact@v4
         with:
           name: rtl9617c-factory-linux-x86_64
