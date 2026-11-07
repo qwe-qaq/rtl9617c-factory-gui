@@ -141,11 +141,11 @@ pub fn validate_nv_cfg(data: &[u8]) -> Result<(), String> {
             NV_CFG_MAX
         ));
     }
-    if data.len() >= 20 {
+    if data.len() >= 21 {
         if data[0..4] != [0x72, 0xd6, 0xef, 0x41] {
             return Err("NV_CFG magic mismatch (expect 72 D6 EF 41)".into());
         }
-        if &data[4..20] != b"\x13/** NV_CFG **/\n\x00" {
+        if &data[4..21] != b"\x13/** NV_CFG **/\n\x00" {
             return Err("NV_CFG marker mismatch (expect /** NV_CFG **/)".into());
         }
     }
