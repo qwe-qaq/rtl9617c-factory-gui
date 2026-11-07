@@ -53,8 +53,8 @@ fn run(args: &[String]) -> Result<String, String> {
             }
             if model == "pt1570" {
                 if let Some(blob) = &nvcfg_blob {
-                    let text = String::from_utf8(blob.clone())
-                        .map_err(|_| "NV_CFG is not ASCII text".to_string())?;
+                    // 魔数含非 ASCII 字节；字段查找只碰 ASCII 的 KEY=VALUE 区
+                    let text = String::from_utf8_lossy(blob).to_string();
                     let base = extracted
                         .identity
                         .base_mac

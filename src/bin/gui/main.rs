@@ -869,8 +869,9 @@ fn run_extract(
     // （实机日志 hwaddr 证据），DIFF 字段缺失按产线惯例（实机全 0）补齐。
     if model == Model::Pt1570 {
         if let Some(nv) = &nv {
-            let text =
-                String::from_utf8(nv.clone()).map_err(|_| "NV_CFG 不是 ASCII 文本".to_string())?;
+            // 魔数含非 ASCII 字节（72 D6 EF 41），字段查找只碰 ASCII 的
+            // KEY=VALUE 区，lossy 解码不影响结果
+            let text = String::from_utf8_lossy(nv).to_string();
             let base = extracted
                 .identity
                 .base_mac
