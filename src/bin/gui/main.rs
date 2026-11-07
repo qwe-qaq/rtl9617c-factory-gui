@@ -187,10 +187,12 @@ impl App {
                 self.rx = None;
                 match &res {
                     Ok(e) => {
+                        let n =
+                            profile::sections(&e.extracted).map(|s| s.len()).unwrap_or(0);
                         self.status = format!(
-                            "提取完成：{} 个 UBI 卷，5 段校准数据 + 身份信息（{} 段将写入 factory.bin）",
+                            "提取完成：{} 个 UBI 卷，{} 段将写入 factory.bin",
                             e.volumes.len(),
-                            profile::sections(&e.extracted).map(|s| s.len()).unwrap_or(0),
+                            n
                         );
                     }
                     Err(err) => {
@@ -372,23 +374,22 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.strong(row.name);
                     ui.weak(row.note);
-                    let status = match data {
+                    match data {
                         Some(d) => {
                             // xtemp 是 JSON 文本，悬停可预览开头若干字节。
                             let s = format!("{} 字节", d.len());
                             if row.tag == 0x0112 {
-                                let preview = String::from_utf8_lossy(
-                                    &d[..d.len().min(400)],
-                                )
-                                .to_string();
-                                ui.small(s).on_hover_text(preview);
+                                let preview =
+                                    String::from_utf8_lossy(&d[..d.len().min(400)]).to_string();
+                                ui.weak(s).on_hover_text(preview);
                             } else {
                                 ui.weak(s);
                             }
                         }
-                        None => ui.weak("空（此机型无）"),
-                    };
-                    drop(status);
+                        None => {
+                            ui.weak("空（此机型无）");
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(d) = data {
                             if ui.button("导出…").clicked() {
@@ -467,13 +468,18 @@ impl App {
 
     /// 处理拖入的文件：按文件名分类到 env / env2 / ubi_device 槽位。
     fn handle_drops(&mut self, ctx: &egui::Context) {
+        // egui 0.36 起 dropped_files 是 `Arc<dyn DroppedFile>` trait 对象，
+        // 路径用 `path()` 方法读取（返回类型随平台为 &Path/&PathBuf，统一转拥有值）。
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .filter_map(|f| f.path().map(|p| p.to_path_buf()))
                 .collect()
         });
+        if dropped.is_empty() {
+            return;
+        }
         for path in dropped {
             let name = path
                 .file_name()
@@ -487,10 +493,8 @@ impl App {
                 self.device_path = Some(path);
             }
         }
-        if !ctx.input(|i| i.raw.dropped_files.is_empty()) {
-            let ctx2 = ctx.clone();
-            self.start_extract(&ctx2);
-        }
+        let ctx2 = ctx.clone();
+        self.start_extract(&ctx2);
     }
 }
 
