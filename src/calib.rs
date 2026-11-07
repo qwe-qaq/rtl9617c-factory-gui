@@ -127,6 +127,31 @@ pub fn validate_a2h_dump(data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// WIFI_NV_CFG 段（tag 0x0103）的容量上限（PT1570 实测 598 字节，留余量）。
+pub const NV_CFG_MAX: usize = 0x400;
+
+/// 校验 mtd3_static_conf 的 NV_CFG 转储：魔数 `72 D6 EF 41` + `/** NV_CFG **/`
+/// 标记。PT1570 实测布局：魔数(4B) + 0x13 + "/** NV_CFG **/\n" + NUL +
+/// `KEY=VALUE` 列表（NUL 分隔）。整段原样存档，不解析不重组。
+pub fn validate_nv_cfg(data: &[u8]) -> Result<(), String> {
+    if data.len() > NV_CFG_MAX {
+        return Err(format!(
+            "NV_CFG dump too large: {} > {} bytes",
+            data.len(),
+            NV_CFG_MAX
+        ));
+    }
+    if data.len() >= 20 {
+        if data[0..4] != [0x72, 0xd6, 0xef, 0x41] {
+            return Err("NV_CFG magic mismatch (expect 72 D6 EF 41)".into());
+        }
+        if &data[4..20] != b"\x13/** NV_CFG **/\n\x00" {
+            return Err("NV_CFG marker mismatch (expect /** NV_CFG **/)".into());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +171,31 @@ mod tests {
             hex_bytes_field(doc, "HW_2G_CCK_TSSI_A").unwrap(),
             vec![0xfe, 0xfe, 0x09, 0x04, 0x04, 0x04]
         );
+    }
+
+    #[test]
+    fn nv_cfg_validation() {
+        let mut d = vec![0x72, 0xd6, 0xef, 0x41];
+        d.extend_from_slice(b"\x13/** NV_CFG **/\n\x00HW_X=1\0");
+        assert!(validate_nv_cfg(&d).is_ok());
+        // 不足 20 字节：跳过魔数校验（部分转储）
+        assert!(validate_nv_cfg(&d[..15]).is_ok());
+        let mut bad_magic = d.clone();
+        bad_magic[0] = 0x00;
+        assert!(validate_nv_cfg(&bad_magic).is_err());
+        let mut bad_marker = d.clone();
+        bad_marker[4] = 0x00;
+        assert!(validate_nv_cfg(&bad_marker).is_err());
+        assert!(validate_nv_cfg(&vec![0u8; 0x401]).is_err());
+    }
+
+    #[test]
+    fn a2h_dump_validation() {
+        let mut d = vec![0u8; 0x60];
+        d[0x5F] = d[..0x5F].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        assert!(validate_a2h_dump(&d).is_ok());
+        d[0x5F] = d[0x5F].wrapping_add(1);
+        assert!(validate_a2h_dump(&d).is_err());
+        assert!(validate_a2h_dump(&vec![0u8; 0x401]).is_err());
     }
 }

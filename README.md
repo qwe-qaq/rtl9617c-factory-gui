@@ -122,6 +122,7 @@ LZO 压缩）、`scratchpad`、`newkey`/`newkey.cert`、`mnclt_*` 等，**无任
 | `0x4800` | `0x400` | `0x0111` | BOSA_OLT_CALIBRATION | `rtkoltbosa_k.bin`（588 B） | 空（在 EEPROM） |
 | `0x5000` | `0x1000` | `0x0112` | XTEMP_CALIBRATION | `xtemp.cal`（JSON） | 空 |
 | `0x6000` | `0x400` | `0x0102` | **PON_MODULE_EEPROM**（本仓新增） | 可选（见 EEPROM 章节） | 可选 |
+| `0x7000` | `0x400` | `0x0103` | **WIFI_NV_CFG**（本仓新增） | — | 可选（pt1570 mtd3 NV_CFG 原样存档） |
 | `0x10000` | `0x7E0000` | `0x0200` | FPGA_IMAGE | `ubi_fpga` 卷原始内容 | 空 |
 
 `0x001040`–`0x001FFF`、`0x007000`–`0x00FFFF` 为预留空隙；新硬件字段优先使用
@@ -164,9 +165,12 @@ Wi-Fi 校准段是原厂 `factory.uc` 组装格式的逐字节移植，字段全
 > ⚠️ **PT1570 的 Wi-Fi 校准字段在 `mtd3_static_conf.bin`**（`/** NV_CFG **/` +
 > `KEY=VALUE\0` 列表，实测 19 个字段：gaingap×5、thermal×2×2、xcap×2、TSSI 表×6），
 > 但**缺少第 6/7 步的 TSSI GAIN/CW DIFF 字段**，无法按原厂格式完整组装，故工具
-> 不生成（不猜数据）。另注意 PT1570 的 wlan 映射与 tyfza1 **相反**
-> （`HW_WLAN0_FEM_TYPE=17`=2G、`HW_WLAN1_FEM_TYPE=238`=5G），mtd4 日志显示其 2G
-> 芯片同为 `rtl8192xbe`、参数从 rootfs `/etc/conf/rtl8192xbe/...` 下载。
+> 不生成（不猜数据）。NV_CFG 可**整段原样存档**进 factory.bin：tag `0x0103`
+> `WIFI_NV_CFG`（偏移 `0x7000`，容量 `0x400`）——GUI「Wi-Fi NV_CFG (mtd3)」行
+> 载入，CLI `--wifi-nvcfg <file>`，载入时校验魔数 `72 D6 EF 41` + `/** NV_CFG **/`
+> 标记；WLAN 驱动直接读 NV 分区（推定），此段为存档用途。另注意 PT1570 的 wlan
+> 映射与 tyfza1 **相反**（`HW_WLAN0_FEM_TYPE=17`=2G、`HW_WLAN1_FEM_TYPE=238`=5G），
+> mtd4 日志显示其 2G 芯片同为 `rtl8192xbe`、参数从 rootfs `/etc/conf/rtl8192xbe/...` 下载。
 
 ## PON 模块 EEPROM（A2h）存档（tag 0x0102，本仓新增）
 

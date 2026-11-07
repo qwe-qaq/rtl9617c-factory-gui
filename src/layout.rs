@@ -36,6 +36,10 @@ pub const FIELDS: &[FieldSpec] = &[
     // 转储：0x0000-0x00FF 为 A2h 基页（0x5F 为 CC_EXT 校验和），其后可按
     // README 追加私有页（0x80 / 0x81 / T2 / T3，各 128B）。
     FieldSpec { tag: 0x0102, name: "PON_MODULE_EEPROM", offset: 0x6000, capacity: 0x400 },
+    // pt1570 的 Wi-Fi 校准字段在 mtd3_static_conf 的 NV_CFG 区（/** NV_CFG **/ +
+    // KEY=VALUE\0 列表），缺 TYFC0003 组装所需的 TSSI DIFF 字段，故按原文存档，
+    // 不组装。消费端（WLAN 驱动）直接读 NV 分区，此处为存档用途。
+    FieldSpec { tag: 0x0103, name: "WIFI_NV_CFG", offset: 0x7000, capacity: 0x400 },
     FieldSpec { tag: 0x0200, name: "FPGA_IMAGE", offset: 0x10000, capacity: 0x7E0000 },
 ];
 
@@ -355,5 +359,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(compact[0x6000..0x6100], [0x5a; 256]);
+    }
+
+    #[test]
+    fn wifi_nv_cfg_field() {
+        let s = spec(0x0103).unwrap();
+        assert_eq!(s.offset, 0x7000);
+        assert_eq!(s.capacity, 0x400);
+        let mut data = vec![0x72, 0xd6, 0xef, 0x41];
+        data.extend_from_slice(b"\x13/** NV_CFG **/\n\x00HW_X=1\0");
+        let image = build(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0103, data: data.clone() }],
+        )
+        .unwrap();
+        assert_eq!(&image[0x7000..0x7000 + data.len()], &data[..]);
+        // 紧凑镜像同样容纳该段（0x7000 < COMPACT_SIZE）
+        let compact = build_compact(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0103, data: data.clone() }],
+        )
+        .unwrap();
+        assert_eq!(compact[0x7000], 0x72);
+        assert!(build(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0103, data: vec![0; 0x401] }]
+        )
+        .is_err());
     }
 }

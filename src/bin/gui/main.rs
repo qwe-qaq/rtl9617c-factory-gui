@@ -144,6 +144,9 @@ struct App {
     /// 用户提供的光模块 A2h EEPROM 转储（factory.bin tag 0x0102，可选）。
     /// env 机型的 PON 口校准在光模块内，只能从原厂固件 i2cdump 获得。
     pon_eeprom: Option<Vec<u8>>,
+    /// 用户提供的 mtd3 NV_CFG 转储（factory.bin tag 0x0103，可选）。
+    /// pt1570 的 Wi-Fi 校准字段在其中，因缺 DIFF 字段不组装、原样存档。
+    wifi_nvcfg: Option<Vec<u8>>,
     /// 提取结果（None = 尚未提取）。
     result: Option<Result<Extraction, String>>,
     build_out: Option<Result<BuildOut, String>>,
@@ -161,6 +164,7 @@ impl App {
             env2_path: None,
             device_path: None,
             pon_eeprom: None,
+            wifi_nvcfg: None,
             result: None,
             build_out: None,
             status: "选择机型与数据来源（env / ubi_device），或直接把备份文件拖进窗口"
@@ -254,6 +258,12 @@ impl App {
             if let Some(data) = &self.pon_eeprom {
                 sections.push(layout::Section {
                     tag: 0x0102,
+                    data: data.clone(),
+                });
+            }
+            if let Some(data) = &self.wifi_nvcfg {
+                sections.push(layout::Section {
+                    tag: 0x0103,
                     data: data.clone(),
                 });
             }
@@ -435,6 +445,64 @@ impl App {
                                             data.len()
                                         );
                                         self.pon_eeprom = Some(data);
+                                    }
+                                    Err(e) => self.status = format!("载入被拒: {e}"),
+                                },
+                                Err(e) => self.status = format!("读取失败: {e}"),
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    /// mtd3 NV_CFG 转储行（pt1570 的 Wi-Fi 校准字段，原样存档，可选）。
+    fn ui_wifi_nvcfg(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(2.0);
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.strong("Wi-Fi NV_CFG (mtd3)");
+                ui.weak("pt1570 Wi-Fi 校准字段 · 缺 DIFF 不组装 · 原样存档");
+                match &self.wifi_nvcfg {
+                    Some(d) => ui.weak(format!("已载入 {} 字节", d.len())),
+                    None => ui.weak("未提供"),
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.wifi_nvcfg.is_some() && ui.button("清除").clicked() {
+                        self.wifi_nvcfg = None;
+                        self.status = "已清除 Wi-Fi NV_CFG 转储".into();
+                    }
+                    if let Some(d) = &self.wifi_nvcfg {
+                        if ui.button("导出…").clicked() {
+                            if let Some(p) = FileDialog::new()
+                                .set_file_name("wifi-nvcfg.bin")
+                                .save_file()
+                            {
+                                match std::fs::write(&p, d.as_slice()) {
+                                    Ok(_) => {
+                                        self.status =
+                                            format!("已导出 {} 字节 -> {}", d.len(), p.display())
+                                    }
+                                    Err(e) => self.status = format!("导出失败: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("载入…").clicked() {
+                        if let Some(p) = FileDialog::new()
+                            .add_filter("NV_CFG 转储", &["bin", "conf"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&p) {
+                                Ok(data) => match calib::validate_nv_cfg(&data) {
+                                    Ok(()) => {
+                                        self.status = format!(
+                                            "已载入 Wi-Fi NV_CFG: {} 字节（魔数校验通过）",
+                                            data.len()
+                                        );
+                                        self.wifi_nvcfg = Some(data);
                                     }
                                     Err(e) => self.status = format!("载入被拒: {e}"),
                                 },
@@ -786,6 +854,7 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 self.ui_sources(ui);
                 self.ui_pon_eeprom(ui);
+                self.ui_wifi_nvcfg(ui);
                 self.ui_identity(ui);
                 self.ui_sections(ui);
                 self.ui_ubi_info(ui);
