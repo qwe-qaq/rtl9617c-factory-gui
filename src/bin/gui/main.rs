@@ -554,7 +554,10 @@ impl App {
         ui.strong("身份信息（产线烧录数据）");
         let i = &ext.extracted.identity;
         // 有 Wi-Fi 校准的机型才展示派生 MAC（与校准块内嵌值同规则）。
-        let has_wifi_cal = matches!(self.model, Model::Tyfza1 | Model::Pt1570R10);
+        let has_wifi_cal = matches!(
+            self.model,
+            Model::Tyfza1 | Model::Pt1570 | Model::Pt1570R10
+        );
         egui::Grid::new("identity")
             .num_columns(2)
             .spacing([12.0, 5.0])
@@ -616,6 +619,13 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.strong(row.title);
                     ui.weak(format!("{} · {}", row.name, row.note));
+                    // Wi-Fi 校准行直接显示内嵌 MAC 实际值（5G=base+2、2.4G=base+1）
+                    if row.tag == 0x0100 || row.tag == 0x0101 {
+                        if let Some(base) = ext.extracted.identity.base_mac {
+                            let off = if row.tag == 0x0100 { 2u64 } else { 1u64 };
+                            ui.weak(format!("内嵌 {}", mac_to_string(&derived_mac(base, off))));
+                        }
+                    }
                     match data {
                         Some(d) => {
                             // xtemp 是 JSON 文本，悬停可预览开头若干字节。
