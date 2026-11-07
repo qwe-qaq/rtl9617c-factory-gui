@@ -3,7 +3,8 @@
 //! config.xml 产线字段、校准文件内容，以及 tyfza1 提取结果与 Wi-Fi 校准块
 //! 内嵌 MAC 的定位。
 //!
-//! 用法：rtl9617c-factory-inspect <mtd1_env.bin> <mtd2_env2.bin> <mtd4_ubi_device.bin>
+//! 用法：rtl9617c-factory-inspect <mtd1_env.bin> <mtd2_env2.bin> <mtd4_ubi_device.bin> [model]
+//! 其中 model 缺省为 tyfza1，可选 tyfza1 / pt1500-h10 / pt1570。
 use rtl9617c_factory::{calib, env, profile, ubi, ubifs, xml};
 use std::collections::BTreeMap;
 
@@ -81,29 +82,39 @@ fn main() {
         println!("  {:<24} {:>8} 字节", name, data.len());
     }
 
-    let hs = String::from_utf8(files["config_hs.xml"].clone()).expect("utf8");
-    let cs = String::from_utf8(files["config.xml"].clone()).expect("utf8");
+    let hs = files
+        .get("config_hs.xml")
+        .and_then(|d| String::from_utf8(d.clone()).ok());
+    let cs = files
+        .get("config.xml")
+        .and_then(|d| String::from_utf8(d.clone()).ok());
 
-    println!("================ config_hs.xml 身份字段 ================");
-    for key in ["ELAN_MAC_ADDR", "GPON_SN"] {
-        match xml::optional_field(&hs, key) {
-            Some(v) => println!("  {:<16} = {:?}", key, v),
-            None => println!("  {:<16} = <无>", key),
+    if let Some(hs) = &hs {
+        println!("================ config_hs.xml 身份字段 ================");
+        for key in ["ELAN_MAC_ADDR", "GPON_SN"] {
+            match xml::optional_field(hs, key) {
+                Some(v) => println!("  {:<16} = {:?}", key, v),
+                None => println!("  {:<16} = <无>", key),
+            }
         }
+
+        println!("================ config_hs.xml Wi-Fi 校准字段（组装进 TYFC0003）================");
+        for line in hs.lines().filter(|l| l.contains("Name=\"HW_")) {
+            println!("  {}", line.trim());
+        }
+    } else {
+        println!("================ config_hs.xml：本备份 ubi_Config 中无此文件（env 机型）================");
     }
 
-    println!("================ config_hs.xml Wi-Fi 校准字段（组装进 TYFC0003）================");
-    for line in hs.lines().filter(|l| l.contains("Name=\"HW_")) {
-        println!("  {}", line.trim());
-    }
-
-    println!("================ config.xml EPON ================");
-    println!("  EPON_LLID_TBL.macAddr = {:?}", calib::epon_llid_mac(&cs));
-    if let Some(p) = cs.find("EPON_LLID_TBL") {
-        let seg = &cs[p..(p + 600).min(cs.len())];
-        for line in seg.lines().filter(|l| l.contains("macAddr")) {
-            println!("  原文: {}", line.trim());
-            break;
+    if let Some(cs) = &cs {
+        println!("================ config.xml EPON ================");
+        println!("  EPON_LLID_TBL.macAddr = {:?}", calib::epon_llid_mac(cs));
+        if let Some(p) = cs.find("EPON_LLID_TBL") {
+            let seg = &cs[p..(p + 600).min(cs.len())];
+            for line in seg.lines().filter(|l| l.contains("macAddr")) {
+                println!("  原文: {}", line.trim());
+                break;
+            }
         }
     }
 
@@ -128,8 +139,11 @@ fn main() {
         );
     }
 
-    println!("================ tyfza1 提取结果（等价 CLI dump）================");
-    let extracted = profile::profile("tyfza1").unwrap()(&set, &image).expect("extract");
+    let model = args.get(3).map(|s| s.as_str()).unwrap_or("tyfza1");
+    println!("================ {model} 提取结果（等价 CLI dump）================");
+    let extracted = profile::profile(model)
+        .expect("unknown model")(&set, &image)
+        .expect("extract");
     let i = &extracted.identity;
     println!(
         "  BASE_MAC  = {}  (写入 factory.bin 后 MAC 数量 {})",
@@ -138,30 +152,36 @@ fn main() {
     );
     println!("  EPON_MAC  = {}", i.epon_mac.map(|m| mac(&m)).unwrap_or("-".into()));
     println!("  PON_SN    = {}", i.pon_sn.as_deref().unwrap_or("-"));
-    println!("  DEVICE_SN = {}（tyfza1 无产线数据源）", i.device_sn.as_deref().unwrap_or("-"));
-    let base = i.base_mac.expect("base mac");
-    for (label, blob, off) in [
-        ("wifi0 (5G, rtl8852ce, TYFC0003)", &extracted.wifi0, 2u64),
-        ("wifi1 (2G, rtl8192xbe, TYFC0003)", &extracted.wifi1, 1u64),
-    ] {
-        match blob {
-            Some(d) => {
-                let em = derived_mac(base, off);
-                let at = find_sub(d, &em);
-                println!(
-                    "  {}  {} 字节  头: {}",
-                    label,
-                    d.len(),
-                    hex16(d)
-                );
-                println!(
-                    "    内嵌 MAC {} (base{}) 位于 blob 偏移 {}",
-                    mac(&em),
-                    if off == 2 { "+2" } else { "+1" },
-                    at.map(|p| format!("0x{p:04X}")).unwrap_or_else(|| "<未找到>".into())
-                );
+    if let Some(sn) = &i.device_sn {
+        println!("  DEVICE_SN = {sn}");
+    } else if model == "tyfza1" {
+        println!("  DEVICE_SN = -（tyfza1 无产线数据源）");
+    } else {
+        println!("  DEVICE_SN = -");
+    }
+    if model == "tyfza1" {
+        let base = i.base_mac.expect("base mac");
+        for (label, blob, off) in [
+            ("wifi0 (5G, rtl8852ce, TYFC0003)", &extracted.wifi0, 2u64),
+            ("wifi1 (2G, rtl8192xbe, TYFC0003)", &extracted.wifi1, 1u64),
+        ] {
+            match blob {
+                Some(d) => {
+                    let em = derived_mac(base, off);
+                    let at = find_sub(d, &em);
+                    println!("  {}  {} 字节  头: {}", label, d.len(), hex16(d));
+                    println!(
+                        "    内嵌 MAC {} (base{}) 位于 blob 偏移 {}",
+                        mac(&em),
+                        if off == 2 { "+2" } else { "+1" },
+                        at.map(|p| format!("0x{p:04X}"))
+                            .unwrap_or_else(|| "<未找到>".into())
+                    );
+                }
+                None => println!("  {}  <空>", label),
             }
-            None => println!("  {}  <空>", label),
         }
+    } else {
+        println!("  Wi-Fi / PON 校准：env 机型无校准数据段（与 CLI dump 一致为空）");
     }
 }

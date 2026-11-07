@@ -23,10 +23,11 @@ RTL9617C 平台 GPON 光猫 **Factory 镜像的查看 / 提取 / 生成** 工具
 |---|---|---|
 | `tyfza1` | 天邑 TYFZA1（Wi-Fi + 下行光 + FPGA） | `ubi_Config` 卷内 `config_hs.xml` / `config.xml` / `rtkbosa_k.bin` / `rtkoltbosa_k.bin` / `xtemp.cal`，`ubi_fpga` 卷 |
 | `pt1500-h10` | 友华 PT1500-H10（无 Wi-Fi / 无下行光） | U-Boot env `kp_*` keyparam 变量 |
+| `pt1570` | 友华 PT1570-H10（有 Wi-Fi 硬件，但备份中无校准数据：卷表无 `ubi_fpga`，`ubi_Config` 内无 config_hs.xml / BOSA / xtemp） | U-Boot env `kp_*` keyparam 变量（含整机 SN `kp_szSerialNumber`） |
 
 需要的输入文件（整机备份里都有）：
 
-| 文件 | 说明 | tyfza1 | pt1500-h10 |
+| 文件 | 说明 | tyfza1 | pt1500-h10 / pt1570 |
 |---|---|---|---|
 | `mtd1_env.bin` | U-Boot env 主分区 | 可省（不使用） | **必需** |
 | `mtd2_env2.bin` | env 备分区（可选） | 多分区时取 flags 更大者 | 同左 |
@@ -48,10 +49,12 @@ RTL9617C 平台 GPON 光猫 **Factory 镜像的查看 / 提取 / 生成** 工具
 | `XTEMP_CALIBRATION` | `ubi_Config` → `xtemp.cal`（JSON 文本） | GUI 悬停该行可预览 |
 | `FPGA_IMAGE` | UBI 卷 `ubi_fpga` 原始内容（fpgafs squashfs） | 整卷直搬，洞补 `0xFF` |
 
-> `mtd1/mtd2` env 对 tyfza1 不承载产线身份数据（只是 U-Boot 变量）；只有
-> pt1500-h10 从 env 的 `kp_ucaBaseMacAddr` / `kp_ulNumMacAddrs` / `kp_szXponSN` /
-> `kp_szSerialNumber` 取数。想看备份里的原始数据，用
-> `rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin`。
+> `mtd1/mtd2` env 对 tyfza1 不承载产线身份数据（只是 U-Boot 变量）；env 机型
+> （pt1500-h10 / pt1570）从 env 的 `kp_ucaBaseMacAddr` / `kp_ulNumMacAddrs` /
+> `kp_szXponSN` 取数，pt1570 另有整机 SN `kp_szSerialNumber`（PT1570 实测样例：
+> MAC `68:7d:00:5a:19:be`、MAC 数量 11、XPON SN `YHTC005A19BE`、整机 SN
+> `0E863687D005A19BE`）。想看备份里的原始数据，用
+> `rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin [model]`。
 
 ## Factory bin 规范（RTLFACT1）
 

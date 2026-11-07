@@ -30,33 +30,39 @@ enum Model {
     Tyfza1,
     /// 友华 PT1500-H10：无 Wi-Fi / 无下行光，数据在 U-Boot env `kp_*`。
     Pt1500H10,
+    /// 友华 PT1570-H10：env keyparam 机型（含整机 SN `kp_szSerialNumber`），
+    /// 备份卷表中无 ubi_fpga 与校准文件，Wi-Fi/BOSA 段为空。
+    Pt1570,
 }
 
 impl Model {
-    fn all() -> [Model; 2] {
-        [Model::Tyfza1, Model::Pt1500H10]
+    fn all() -> [Model; 3] {
+        [Model::Tyfza1, Model::Pt1500H10, Model::Pt1570]
     }
     fn key(self) -> &'static str {
         match self {
             Model::Tyfza1 => "tyfza1",
             Model::Pt1500H10 => "pt1500-h10",
+            Model::Pt1570 => "pt1570",
         }
     }
     fn label(self) -> &'static str {
         match self {
             Model::Tyfza1 => "天邑 TYFZA1",
             Model::Pt1500H10 => "友华 PT1500-H10",
+            Model::Pt1570 => "友华 PT1570-H10",
         }
     }
     fn id(self) -> u32 {
         match self {
             Model::Tyfza1 => layout::MODEL_TYFZA1,
             Model::Pt1500H10 => layout::MODEL_PT1500_H10,
+            Model::Pt1570 => layout::MODEL_PT1570,
         }
     }
     /// env 分区对本机型是否必需（tyfza1 的数据全部来自 ubi_device）。
     fn needs_env(self) -> bool {
-        matches!(self, Model::Pt1500H10)
+        matches!(self, Model::Pt1500H10 | Model::Pt1570)
     }
 }
 
@@ -176,7 +182,7 @@ impl App {
         let env2 = self.env2_path.clone();
         let model = self.model;
         if model.needs_env() && env.is_none() {
-            self.status = "pt1500-h10 需要 U-Boot env 分区（mtd1_env.bin）".into();
+            self.status = "该机型需要 U-Boot env 分区（mtd1_env.bin）".into();
             return;
         }
         let (tx, rx) = mpsc::channel();
@@ -329,10 +335,14 @@ impl App {
                 .small(),
         );
         ui.label(
-            egui::RichText::new(if self.model.needs_env() {
-                "pt1500-h10：身份与 SN 来自 env 的 kp_* 产线变量"
-            } else {
-                "tyfza1：身份与校准数据都在 ubi_device 的 ubi_Config / ubi_fpga 卷里，env 不参与"
+            egui::RichText::new(match self.model {
+                Model::Tyfza1 => {
+                    "tyfza1：身份与校准数据都在 ubi_device 的 ubi_Config / ubi_fpga 卷里，env 不参与"
+                }
+                Model::Pt1500H10 => "pt1500-h10：身份与 SN 来自 env 的 kp_* 产线变量",
+                Model::Pt1570 => {
+                    "pt1570：身份与 SN 来自 env 的 kp_* 产线变量（整机 SN = kp_szSerialNumber）"
+                }
             })
             .weak()
             .small(),

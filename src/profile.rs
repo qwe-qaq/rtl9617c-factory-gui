@@ -1,6 +1,8 @@
 use crate::calib::{epon_llid_mac, flash_calibration, RADIO0_5G, RADIO1_2G};
 use crate::env::{parse_mac, EnvSet};
-use crate::layout::{encode_string, Section, IMAGE_SIZE, MODEL_PT1500_H10, MODEL_TYFZA1};
+use crate::layout::{
+    encode_string, Section, IMAGE_SIZE, MODEL_PT1500_H10, MODEL_PT1570, MODEL_TYFZA1,
+};
 use crate::ubi::{Image as UbiImage, Volume};
 use crate::ubifs;
 use crate::xml::{field, optional_field};
@@ -110,6 +112,18 @@ impl DeviceProfile for Pt1500H10 {
     }
 }
 
+/// 友华 PT1570-H10：与 PT1500-H10 同为 env keyparam 机型（实测备份卷表中只有
+/// ubi_Config / ubi_otherConfig / ubi_BakConfig / 内核 rootfs 等卷，无 ubi_fpga，
+/// 也没有 config_hs.xml / BOSA / xtemp 校准文件），身份字段来源一致，且整机 SN
+/// 来自 `kp_szSerialNumber`。单独建型号便于日后补充该校准或新字段。
+pub struct Pt1570;
+
+impl DeviceProfile for Pt1570 {
+    fn extract(env: &EnvSet, device: &UbiImage) -> Result<Extracted, String> {
+        Pt1500H10::extract(env, device)
+    }
+}
+
 fn read_text(files: &ubifs::Files, name: &str) -> Result<String, String> {
     let data = files
         .get(name)
@@ -121,6 +135,7 @@ pub fn profile(name: &str) -> Result<fn(&EnvSet, &UbiImage) -> Result<Extracted,
     match name {
         "tyfza1" => Ok(Tyfza1::extract),
         "pt1500-h10" => Ok(Pt1500H10::extract),
+        "pt1570" => Ok(Pt1570::extract),
         other => Err(format!("unknown model: {other}")),
     }
 }
@@ -129,6 +144,7 @@ pub fn model_id(name: &str) -> Result<u32, String> {
     match name {
         "tyfza1" => Ok(MODEL_TYFZA1),
         "pt1500-h10" => Ok(MODEL_PT1500_H10),
+        "pt1570" => Ok(MODEL_PT1570),
         other => Err(format!("unknown model: {other}")),
     }
 }

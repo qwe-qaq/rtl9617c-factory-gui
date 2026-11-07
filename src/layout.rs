@@ -5,6 +5,7 @@ pub const MAGIC: &[u8; 8] = b"RTLFACT1";
 pub const VERSION: u32 = 1;
 pub const MODEL_TYFZA1: u32 = 1;
 pub const MODEL_PT1500_H10: u32 = 2;
+pub const MODEL_PT1570: u32 = 3;
 
 const DIR_OFFSET: usize = 0x0200;
 const DIR_COUNT: usize = 32;
