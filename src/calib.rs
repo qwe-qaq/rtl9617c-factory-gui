@@ -144,11 +144,9 @@ pub fn normalize_nv_cfg(data: &[u8]) -> Result<Vec<u8>, String> {
     if &data[4..21] != b"\x13/** NV_CFG **/\n\x00" {
         return Err("NV_CFG marker mismatch (expect /** NV_CFG **/)".into());
     }
-    let end = data
-        .iter()
-        .rposition(|&b| b != 0)
-        .map_or(21, |i| i + 1)
-        .max(21);
+    let last = data.iter().rposition(|&b| b != 0).map_or(21, |i| i + 1);
+    // 保留最后一个条目的 NUL 终止符（若有），与原分区中的段边界一致
+    let end = (last + 1).min(data.len()).max(21);
     if end > NV_CFG_MAX {
         return Err(format!(
             "NV_CFG section too large: {} > {} bytes",
