@@ -21,7 +21,7 @@ use rfd::FileDialog;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use rtl9617c_factory::{env as envmod, layout, profile, ubi};
+use rtl9617c_factory::{calib, env as envmod, layout, profile, ubi};
 
 /// 当前机型（与 CLI `--model` 一一对应）。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -141,6 +141,9 @@ struct App {
     env_path: Option<PathBuf>,
     env2_path: Option<PathBuf>,
     device_path: Option<PathBuf>,
+    /// 用户提供的光模块 A2h EEPROM 转储（factory.bin tag 0x0102，可选）。
+    /// env 机型的 PON 口校准在光模块内，只能从原厂固件 i2cdump 获得。
+    pon_eeprom: Option<Vec<u8>>,
     /// 提取结果（None = 尚未提取）。
     result: Option<Result<Extraction, String>>,
     build_out: Option<Result<BuildOut, String>>,
@@ -157,6 +160,7 @@ impl App {
             env_path: None,
             env2_path: None,
             device_path: None,
+            pon_eeprom: None,
             result: None,
             build_out: None,
             status: "选择机型与数据来源（env / ubi_device），或直接把备份文件拖进窗口"
@@ -246,7 +250,13 @@ impl App {
             return;
         };
         let res = (|| -> Result<BuildOut, String> {
-            let sections = profile::sections(&ext.extracted)?;
+            let mut sections = profile::sections(&ext.extracted)?;
+            if let Some(data) = &self.pon_eeprom {
+                sections.push(layout::Section {
+                    tag: 0x0102,
+                    data: data.clone(),
+                });
+            }
             let generation = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -341,7 +351,7 @@ impl App {
                 }
                 Model::Pt1500H10 => "pt1500-h10：身份与 SN 来自 env 的 kp_* 产线变量",
                 Model::Pt1570 => {
-                    "pt1570：身份与 SN 来自 env 的 kp_* 产线变量（整机 SN = kp_szSerialNumber）"
+                    "pt1570：身份与 SN 来自 env 的 kp_* 产线变量；PON 校准在 EEPROM（不在分区），Wi-Fi 校准字段在 mtd3 NV_CFG"
                 }
             })
             .weak()
@@ -377,6 +387,64 @@ impl App {
             let ctx = ui.ctx().clone();
             self.start_extract(&ctx);
         }
+    }
+
+    /// 光模块 A2h EEPROM 转储行（用户自行从原厂固件 dump，可选载入）。
+    fn ui_pon_eeprom(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(2.0);
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.strong("PON 模块 EEPROM (A2h)");
+                ui.weak("env 机型 PON 口校准所在 · 原厂固件 i2cdump 0x51 · 校验 0x5F");
+                match &self.pon_eeprom {
+                    Some(d) => ui.weak(format!("已载入 {} 字节", d.len())),
+                    None => ui.weak("未提供"),
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.pon_eeprom.is_some() && ui.button("清除").clicked() {
+                        self.pon_eeprom = None;
+                        self.status = "已清除 PON EEPROM 转储".into();
+                    }
+                    if let Some(d) = &self.pon_eeprom {
+                        if ui.button("导出…").clicked() {
+                            if let Some(p) = FileDialog::new()
+                                .set_file_name("pon-a2h-dump.bin")
+                                .save_file()
+                            {
+                                match std::fs::write(&p, d.as_slice()) {
+                                    Ok(_) => {
+                                        self.status =
+                                            format!("已导出 {} 字节 -> {}", d.len(), p.display())
+                                    }
+                                    Err(e) => self.status = format!("导出失败: {e}"),
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("载入…").clicked() {
+                        if let Some(p) = FileDialog::new()
+                            .add_filter("EEPROM 转储", &["bin", "dump"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&p) {
+                                Ok(data) => match calib::validate_a2h_dump(&data) {
+                                    Ok(()) => {
+                                        self.status = format!(
+                                            "已载入 PON EEPROM 转储: {} 字节（校验和通过）",
+                                            data.len()
+                                        );
+                                        self.pon_eeprom = Some(data);
+                                    }
+                                    Err(e) => self.status = format!("载入被拒: {e}"),
+                                },
+                                Err(e) => self.status = format!("读取失败: {e}"),
+                            }
+                        }
+                    }
+                });
+            });
+        });
     }
 
     fn ui_identity(&mut self, ui: &mut egui::Ui) {
@@ -717,6 +785,7 @@ impl eframe::App for App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.ui_sources(ui);
+                self.ui_pon_eeprom(ui);
                 self.ui_identity(ui);
                 self.ui_sections(ui);
                 self.ui_ubi_info(ui);

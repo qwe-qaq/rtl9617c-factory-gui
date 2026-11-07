@@ -31,6 +31,11 @@ pub const FIELDS: &[FieldSpec] = &[
     FieldSpec { tag: 0x0110, name: "BOSA_CALIBRATION", offset: 0x4000, capacity: 0x0800 },
     FieldSpec { tag: 0x0111, name: "BOSA_OLT_CALIBRATION", offset: 0x4800, capacity: 0x0400 },
     FieldSpec { tag: 0x0112, name: "XTEMP_CALIBRATION", offset: 0x5000, capacity: 0x1000 },
+    // env 机型（pt1500-h10 / pt1570）的 PON 口校准不在 flash 里，而在光模块
+    // A2h EEPROM（SFF-8472，I2C 0x51）。这里存用户从原厂固件 i2cdump 得到的
+    // 转储：0x0000-0x00FF 为 A2h 基页（0x5F 为 CC_EXT 校验和），其后可按
+    // README 追加私有页（0x80 / 0x81 / T2 / T3，各 128B）。
+    FieldSpec { tag: 0x0102, name: "PON_MODULE_EEPROM", offset: 0x6000, capacity: 0x400 },
     FieldSpec { tag: 0x0200, name: "FPGA_IMAGE", offset: 0x10000, capacity: 0x7E0000 },
 ];
 
@@ -322,5 +327,33 @@ mod tests {
         for (x, y) in from_summary.iter().zip(from_sections.iter()) {
             assert_eq!((x.name, x.offset, x.size, x.crc), (y.name, y.offset, y.size, y.crc));
         }
+    }
+
+    #[test]
+    fn pon_module_eeprom_field() {
+        let s = spec(0x0102).unwrap();
+        assert_eq!(s.offset, 0x6000);
+        assert_eq!(s.capacity, 0x400);
+        let image = build(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0102, data: vec![0x5a; 256] }],
+        )
+        .unwrap();
+        assert_eq!(image[0x6000..0x6100], [0x5a; 256]);
+        assert!(build(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0102, data: vec![0; 0x401] }]
+        )
+        .is_err());
+        // 紧凑镜像同样容纳该段（0x6000 < COMPACT_SIZE）
+        let compact = build_compact(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0102, data: vec![0x5a; 256] }],
+        )
+        .unwrap();
+        assert_eq!(compact[0x6000..0x6100], [0x5a; 256]);
     }
 }

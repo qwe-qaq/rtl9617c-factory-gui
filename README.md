@@ -23,7 +23,13 @@ RTL9617C 平台 GPON 光猫 **Factory 镜像的查看 / 提取 / 生成** 工具
 |---|---|---|
 | `tyfza1` | 天邑 TYFZA1（Wi-Fi + 下行光 + FPGA） | `ubi_Config` 卷内 `config_hs.xml` / `config.xml` / `rtkbosa_k.bin` / `rtkoltbosa_k.bin` / `xtemp.cal`，`ubi_fpga` 卷 |
 | `pt1500-h10` | 友华 PT1500-H10（无 Wi-Fi / 无下行光） | U-Boot env `kp_*` keyparam 变量 |
-| `pt1570` | 友华 PT1570-H10（有 Wi-Fi 硬件，但备份中无校准数据：卷表无 `ubi_fpga`，`ubi_Config` 内无 config_hs.xml / BOSA / xtemp） | U-Boot env `kp_*` keyparam 变量（含整机 SN `kp_szSerialNumber`） |
+| `pt1570` | 友华 PT1570-H10（Wi-Fi 校准字段在 mtd3 NV_CFG，但不足以组装 TYFC0003） | U-Boot env `kp_*` keyparam 变量（含整机 SN `kp_szSerialNumber`） |
+
+> **env 机型（pt1500-h10 / pt1570）的 PON 口校准在 EEPROM（光模块/芯片内），不在任何
+> flash 分区里**——备份中无此数据属正常现象，factory.bin 也无需包含它；刷写
+> factory.bin 不会触碰 EEPROM，校准数据天然不受影响。PT1570 的 Wi-Fi 校准字段
+> 在 `mtd3_static_conf.bin` 的 `/** NV_CFG **/` 区（19 个 `HW_*` 字段），但缺少
+> TYFC0003 组装所需的 TSSI GAIN/CW DIFF 尾部字段，故不生成 Wi-Fi 校准段。
 
 需要的输入文件（整机备份里都有）：
 
@@ -110,12 +116,52 @@ rtl9617c-factory build --model tyfza1 --env mtd1_env.bin --env2 mtd2_env2.bin \
 # 生成 64 KiB 紧凑镜像（不含 FPGA）
 rtl9617c-factory build --model tyfza1 ... --compact -o factory-compact.bin
 
+# 附带光模块 A2h EEPROM 转储（tag 0x0102，env 机型 PON 校准存档）
+rtl9617c-factory build --model pt1570 ... --pon-eeprom pon-a2h-dump.bin -o factory.bin
+
 # 打印提取到的字段
 rtl9617c-factory dump --model tyfza1 --env mtd1_env.bin --device mtd4_ubi_device.bin
 
 # 备份分析：env 变量 / UBI 卷 / UBIFS 文件 / XML 产线字段 / 校准内容 / 内嵌 MAC 定位
 rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin
 ```
+
+## PON 模块 EEPROM（A2h）存档（tag 0x0102）
+
+env 机型（pt1500-h10 / pt1570）的 **PON 口校准在光模块 A2h EEPROM 里
+（SFF-8472，I2C 从机 0x51），不在任何 flash 分区**（实测 PT1570：`/data` 的
+`pmd_*`/`laser.conf` 与 psi 的 `PmdCfg` 均为空）。要做校准存档/迁移，需在
+**原厂固件**上用 I2C 读出后交给本工具保管：
+
+```sh
+# 原厂固件（自带 i2c-dev）：
+i2cdump -y -f 0 0x51          # A2h 基页 0x00-0xFF（含 0x38-0x4B 校准系数）
+i2cset -y -f 0 0x51 0x7F 0x80 && i2cdump -y -f 0 0x51   # 私有页 0x80（APD_OFFSET 等）
+i2cset -y -f 0 0x51 0x7F 0x81 && i2cdump -y -f 0 0x51   # 私有页 0x81（APD LUT enable）
+i2cset -y -f 0 0x51 0x7F 0x02 && i2cdump -y -f 0 0x51   # T2
+i2cset -y -f 0 0x51 0x7F 0x03 && i2cdump -y -f 0 0x51   # T3（0xDB 表内校验）
+i2cset -y -f 0 0x51 0x7F 0x00                            # 回基页
+# 也可用原厂 diag：diag i2c … / laser param --dump current
+```
+
+工具把它作为 `PON_MODULE_EEPROM`（tag `0x0102`，偏移 `0x6000`，容量 `0x400`）
+写入 factory.bin / 紧凑镜像，存储布局：
+
+| 字节区间 | 内容 |
+|---|---|
+| `0x000-0x0FF` | A2h 基页（`0x5F` = CC_EXT 校验和） |
+| `0x100-0x17F` | 私有页 0x80（可选） |
+| `0x180-0x1FF` | 私有页 0x81（可选） |
+| `0x200-0x27F` | T2（可选） |
+| `0x280-0x2FF` | T3（可选） |
+
+载入时自动校验 `0x5F = sum(0x00..0x5E) & 0xFF`（≥0x60 字节时）。GUI 在
+「PON 模块 EEPROM (A2h)」行点**载入…**；CLI 用 `--pon-eeprom <dump.bin>`。
+
+> ⚠️ **读得到 ≠ 用得上**：第三方系统要让 PON 上线还需要整套闭源驱动栈
+> （`ca-ne.ko` / `ca-rtk.ko` / `cli-drv.ko` / `libscfg.ko`，vermagic 绑死
+> 内核版本）。本功能定位是**存档与迁移**。刷机前先 dump，刷完不要
+> `mtd erase ubi_device`（会丢设备身份文件）。
 
 ## 与上游 CLI 的一致性
 

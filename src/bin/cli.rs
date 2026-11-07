@@ -3,7 +3,7 @@
 
 use std::process::ExitCode;
 
-use rtl9617c_factory::{env, layout, profile, ubi};
+use rtl9617c_factory::{calib, env, layout, profile, ubi};
 
 fn read_file(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))
@@ -41,7 +41,14 @@ fn run(args: &[String]) -> Result<String, String> {
             let device = read_file(&arg_value(args, "--device")?)?;
             let image = ubi::parse(&device)?;
             let extracted = profile::profile(&model)?(&env, &image)?;
-            let sections = profile::sections(&extracted)?;
+            let mut sections = profile::sections(&extracted)?;
+            // 可选：光模块 A2h EEPROM 转储（env 机型 PON 校准不在 flash 分区里）
+            if let Some(i) = args.iter().position(|a| a == "--pon-eeprom") {
+                let path = args.get(i + 1).ok_or("--pon-eeprom requires a file")?;
+                let data = read_file(path)?;
+                calib::validate_a2h_dump(&data)?;
+                sections.push(layout::Section { tag: 0x0102, data });
+            }
             let generation = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
