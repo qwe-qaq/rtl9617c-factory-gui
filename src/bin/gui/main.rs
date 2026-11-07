@@ -322,15 +322,22 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("RTL9617C Factory");
             ui.separator();
-            for m in Model::all() {
-                if ui.selectable_label(self.model == m, m.label()).clicked() && self.model != m {
-                    self.model = m;
-                    self.build_out = None;
-                    self.status = format!("已切换机型：{}", m.label());
-                    if self.device_path.is_some() {
-                        let ctx = ui.ctx().clone();
-                        self.start_extract(&ctx);
+            // 机型下拉框（4 个机型后横排按钮挤爆顶栏）
+            let prev = self.model;
+            egui::ComboBox::from_id_salt("model_select")
+                .width(150.0)
+                .selected_text(self.model.label())
+                .show_ui(ui, |ui| {
+                    for m in Model::all() {
+                        ui.selectable_value(&mut self.model, m, m.label());
                     }
+                });
+            if self.model != prev {
+                self.build_out = None;
+                self.status = format!("已切换机型：{}", self.model.label());
+                if self.device_path.is_some() {
+                    let ctx = ui.ctx().clone();
+                    self.start_extract(&ctx);
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -419,7 +426,10 @@ impl App {
                 ui.strong("PON 模块 EEPROM (A2h)");
                 ui.weak("env 机型 PON 口校准所在 · 原厂固件 i2cdump 0x51 · 校验 0x5F");
                 match &self.pon_eeprom {
-                    Some(d) => ui.weak(format!("已载入 {} 字节", d.len())),
+                    Some(d) => ui.add(
+                        egui::Label::new(egui::RichText::new(format!("已载入 {} 字节", d.len())).weak())
+                            .truncate(),
+                    ),
                     None => ui.weak("未提供"),
                 };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -483,8 +493,19 @@ impl App {
                             .filter(|s| s.contains('='))
                             .count();
                         let preview = String::from_utf8_lossy(&d[..d.len().min(600)]).to_string();
-                        ui.weak(format!("已载入 {} 字节 · {} 个字段", d.len(), n))
-                            .on_hover_text(preview)
+                        // 长文本截断，避免与右侧按钮重叠
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!(
+                                    "已载入 {} 字节 · {} 个字段",
+                                    d.len(),
+                                    n
+                                ))
+                                .weak(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(preview)
                     }
                     None => ui.weak("未提供"),
                 };
@@ -833,7 +854,8 @@ fn source_row(
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<未选择>".into());
-        ui.label(egui::RichText::new(text).weak().monospace());
+        // 路径可能很长，截断避免与按钮重叠
+        ui.add(egui::Label::new(egui::RichText::new(text).weak().monospace()).truncate());
     });
     ui.add_space(2.0);
     changed
