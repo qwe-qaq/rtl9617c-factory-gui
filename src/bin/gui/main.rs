@@ -63,19 +63,23 @@ impl Model {
 /// 校准/镜像数据段在界面上的展示项（tag 与 layout::FIELDS 对应）。
 struct SectionRow {
     tag: u16,
+    /// factory.bin 里的字段名（与 CLI 段表一致）。
     name: &'static str,
+    /// 界面主标题（中文）。
+    title: &'static str,
+    /// 来源与内容说明。
     note: &'static str,
     /// 「导出」按钮的默认文件名。
     file_name: &'static str,
 }
 
 const SECTION_ROWS: &[SectionRow] = &[
-    SectionRow { tag: 0x0100, name: "WIFI_CAL_RADIO0", note: "5G rtl8852ce 校准（TYFC0003）", file_name: "wifi-cal-radio0.bin" },
-    SectionRow { tag: 0x0101, name: "WIFI_CAL_RADIO1", note: "2G rtl8192xbe 校准（TYFC0003）", file_name: "wifi-cal-radio1.bin" },
-    SectionRow { tag: 0x0110, name: "BOSA_CALIBRATION", note: "rtkbosa_k.bin（下行光模块）", file_name: "rtkbosa_k.bin" },
-    SectionRow { tag: 0x0111, name: "BOSA_OLT_CALIBRATION", note: "rtkoltbosa_k.bin", file_name: "rtkoltbosa_k.bin" },
-    SectionRow { tag: 0x0112, name: "XTEMP_CALIBRATION", note: "xtemp.cal（JSON 文本）", file_name: "xtemp.cal" },
-    SectionRow { tag: 0x0200, name: "FPGA_IMAGE", note: "ubi_fpga 卷原始内容（fpgafs squashfs）", file_name: "ubi_fpga.img" },
+    SectionRow { tag: 0x0100, name: "WIFI_CAL_RADIO0", title: "5G Wi-Fi 校准", note: "config_hs.xml HW_* 组装 TYFC0003 · rtl8852ce · 内嵌 MAC base+2", file_name: "wifi-cal-radio0.bin" },
+    SectionRow { tag: 0x0101, name: "WIFI_CAL_RADIO1", title: "2.4G Wi-Fi 校准", note: "config_hs.xml HW_* 组装 TYFC0003 · rtl8192xbe · 内嵌 MAC base+1", file_name: "wifi-cal-radio1.bin" },
+    SectionRow { tag: 0x0110, name: "BOSA_CALIBRATION", title: "上行 PON 校准", note: "rtkbosa_k.bin · PON 上行口 BOSA 光模块", file_name: "rtkbosa_k.bin" },
+    SectionRow { tag: 0x0111, name: "BOSA_OLT_CALIBRATION", title: "下行 PON 校准", note: "rtkoltbosa_k.bin · 下行 OLT 光口 BOSA", file_name: "rtkoltbosa_k.bin" },
+    SectionRow { tag: 0x0112, name: "XTEMP_CALIBRATION", title: "XTEMP 校准", note: "xtemp.cal · JSON 文本", file_name: "xtemp.cal" },
+    SectionRow { tag: 0x0200, name: "FPGA_IMAGE", title: "FPGA 固件", note: "ubi_fpga 卷原始内容 · fpgafs squashfs", file_name: "ubi_fpga.img" },
 ];
 
 fn section_data<'a>(e: &'a profile::Extracted, tag: u16) -> Option<&'a Vec<u8>> {
@@ -92,6 +96,24 @@ fn section_data<'a>(e: &'a profile::Extracted, tag: u16) -> Option<&'a Vec<u8>> 
 
 fn mac_to_string(m: &[u8; 6]) -> String {
     format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5])
+}
+
+/// 与 `calib::flash_calibration` 相同的派生规则：MAC 视为大端整数后加 offset。
+/// 5G Wi-Fi 校准块内嵌 base+2，2.4G 内嵌 base+1。
+fn derived_mac(base: [u8; 6], offset: u64) -> [u8; 6] {
+    let mut v = 0u64;
+    for b in base {
+        v = (v << 8) | u64::from(b);
+    }
+    v += offset;
+    [
+        ((v >> 40) & 0xff) as u8,
+        ((v >> 32) & 0xff) as u8,
+        ((v >> 24) & 0xff) as u8,
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        (v & 0xff) as u8,
+    ]
 }
 
 /// 提取成功的完整结果（对应 CLI `dump` 的输出内容）。
@@ -306,6 +328,15 @@ impl App {
                 .weak()
                 .small(),
         );
+        ui.label(
+            egui::RichText::new(if self.model.needs_env() {
+                "pt1500-h10：身份与 SN 来自 env 的 kp_* 产线变量"
+            } else {
+                "tyfza1：身份与校准数据都在 ubi_device 的 ubi_Config / ubi_fpga 卷里，env 不参与"
+            })
+            .weak()
+            .small(),
+        );
         let mut changed = false;
         changed |= source_row(
             ui,
@@ -345,11 +376,12 @@ impl App {
         ui.add_space(6.0);
         ui.strong("身份信息（产线烧录数据）");
         let i = &ext.extracted.identity;
+        let is_tyfza1 = matches!(self.model, Model::Tyfza1);
         egui::Grid::new("identity")
             .num_columns(2)
             .spacing([12.0, 5.0])
             .show(ui, |ui| {
-                ui.weak("BASE_MAC");
+                ui.weak("BASE_MAC（产线主 MAC）");
                 ui.monospace(
                     i.base_mac
                         .as_ref()
@@ -359,18 +391,36 @@ impl App {
                 ui.weak("MAC 数量");
                 ui.monospace(format!("{}", i.mac_count));
                 ui.end_row();
-                ui.weak("EPON_MAC");
+                ui.weak("EPON_MAC（PON 口）");
                 ui.monospace(
                     i.epon_mac
                         .as_ref()
                         .map_or("-".into(), |m| mac_to_string(m)),
                 );
                 ui.end_row();
-                ui.weak("PON_SN");
-                ui.monospace(i.pon_sn.as_deref().unwrap_or("-").to_string());
+                // 派生 MAC：与 Wi-Fi 校准块内嵌值一致（5G=base+2，2.4G=base+1），
+                // 仅 tyfza1 有 Wi-Fi 校准，故只在该机型展示。
+                if is_tyfza1 {
+                    if let Some(base) = i.base_mac {
+                        ui.weak("5G Wi-Fi MAC（base+2）");
+                        ui.monospace(mac_to_string(&derived_mac(base, 2)));
+                        ui.end_row();
+                        ui.weak("2.4G Wi-Fi MAC（base+1）");
+                        ui.monospace(mac_to_string(&derived_mac(base, 1)));
+                        ui.end_row();
+                    }
+                }
+                ui.weak("PON_SN（GPON SN）");
+                ui.monospace(i.pon_sn.clone().unwrap_or_else(|| "-".into()));
                 ui.end_row();
-                ui.weak("DEVICE_SN");
-                ui.monospace(i.device_sn.as_deref().unwrap_or("-").to_string());
+                ui.weak("DEVICE_SN（整机 SN）");
+                ui.monospace(i.device_sn.clone().unwrap_or_else(|| {
+                    if is_tyfza1 {
+                        "-（tyfza1 无产线数据源）".into()
+                    } else {
+                        "-".into()
+                    }
+                }));
                 ui.end_row();
             });
     }
@@ -380,15 +430,15 @@ impl App {
             return;
         };
         ui.add_space(6.0);
-        ui.strong("校准数据段（可单独导出）");
+        ui.strong("校准与固件段（可单独导出）");
         ui.add_space(2.0);
         for row in SECTION_ROWS {
             let data = section_data(&ext.extracted, row.tag);
             ui.group(|ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.strong(row.name);
-                    ui.weak(row.note);
+                    ui.strong(row.title);
+                    ui.weak(format!("{} · {}", row.name, row.note));
                     match data {
                         Some(d) => {
                             // xtemp 是 JSON 文本，悬停可预览开头若干字节。
