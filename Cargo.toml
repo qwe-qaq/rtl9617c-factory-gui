@@ -14,6 +14,10 @@ name = "rtl9617c-factory"
 path = "src/bin/cli.rs"
 
 [[bin]]
+name = "rtl9617c-factory-inspect"
+path = "src/bin/inspect.rs"
+
+[[bin]]
 name = "rtl9617c-factory-gui"
 path = "src/bin/gui/main.rs"
 

@@ -36,6 +36,7 @@ fn run(args: &[String]) -> Result<String, String> {
         Some("build") => {
             let model = arg_value(args, "--model")?;
             let output = arg_value(args, "-o")?;
+            let compact = args.iter().any(|a| a == "--compact");
             let env = load_env(args)?;
             let device = read_file(&arg_value(args, "--device")?)?;
             let image = ubi::parse(&device)?;
@@ -45,16 +46,28 @@ fn run(args: &[String]) -> Result<String, String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let bin = layout::build(profile::model_id(&model)?, generation, &sections)?;
+            let model_id = profile::model_id(&model)?;
+            let (bin, entries) = if compact {
+                // 紧凑镜像（64 KiB，不含 FPGA）无法走 summary() 的 8 MiB 校验，
+                // 段表直接从段数据生成
+                let bin = layout::build_compact(model_id, generation, &sections)?;
+                let entries = layout::summarize_sections(&sections)?;
+                (bin, entries)
+            } else {
+                let bin = layout::build(model_id, generation, &sections)?;
+                let entries = layout::summary(&bin)?;
+                (bin, entries)
+            };
             std::fs::write(&output, &bin)
                 .map_err(|e| format!("cannot write {output}: {e}"))?;
             let mut report = format!(
-                "factory image: {} ({} bytes) -> {}\n",
+                "factory image: {} ({} bytes{}) -> {}\n",
                 model,
                 bin.len(),
+                if compact { ", compact (no FPGA)" } else { "" },
                 output
             );
-            for entry in layout::summary(&bin)? {
+            for entry in entries {
                 report.push_str(&format!(
                     "  0x{:06x}  {:<22} size={:<8} crc=0x{:08x}\n",
                     entry.offset, entry.name, entry.size, entry.crc

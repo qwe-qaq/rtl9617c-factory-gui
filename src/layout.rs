@@ -64,11 +64,21 @@ pub struct Section {
     pub data: Vec<u8>,
 }
 
-pub fn build(model: u32, generation: u64, sections: &[Section]) -> Result<Vec<u8>, String> {
-    let mut image = vec![0xffu8; IMAGE_SIZE];
+/// 紧凑镜像大小：完整镜像去掉 `FPGA_IMAGE`（0x10000 起）后的头部 + 目录 +
+/// 身份/校准字段区。布局、CRC 链与完整镜像完全一致，仅 `image_size` 不同，
+/// 适合留存身份数据与校准数据的小体积备份（不可直接刷写，恢复时用完整镜像）。
+pub const COMPACT_SIZE: usize = 0x0001_0000;
+
+fn assemble(
+    model: u32,
+    generation: u64,
+    sections: &[Section],
+    size: usize,
+) -> Result<Vec<u8>, String> {
+    let mut image = vec![0xffu8; size];
     image[0..8].copy_from_slice(MAGIC);
     image[8..12].copy_from_slice(&VERSION.to_le_bytes());
-    image[12..16].copy_from_slice(&(IMAGE_SIZE as u32).to_le_bytes());
+    image[12..16].copy_from_slice(&(size as u32).to_le_bytes());
     image[16..20].copy_from_slice(&model.to_le_bytes());
     image[24..32].copy_from_slice(&generation.to_le_bytes());
     image[IMAGE_CRC_OFFSET..IMAGE_CRC_OFFSET + 4].copy_from_slice(&0u32.to_le_bytes());
@@ -84,6 +94,12 @@ pub fn build(model: u32, generation: u64, sections: &[Section]) -> Result<Vec<u8
             ));
         }
         let offset = spec.offset as usize;
+        if offset + section.data.len() > size {
+            return Err(format!(
+                "section {} does not fit a {}-byte image",
+                spec.name, size
+            ));
+        }
         let existing = written.iter().any(|(t, ..)| *t == section.tag);
         if existing {
             return Err(format!("duplicate section {}", spec.name));
@@ -116,6 +132,46 @@ pub fn build(model: u32, generation: u64, sections: &[Section]) -> Result<Vec<u8
     let image_crc = register(&image, SEED);
     image[IMAGE_CRC_OFFSET..IMAGE_CRC_OFFSET + 4].copy_from_slice(&image_crc.to_le_bytes());
     Ok(image)
+}
+
+pub fn build(model: u32, generation: u64, sections: &[Section]) -> Result<Vec<u8>, String> {
+    assemble(model, generation, sections, IMAGE_SIZE)
+}
+
+/// 紧凑镜像（`COMPACT_SIZE`，不含 FPGA_IMAGE；传入的 0x0200 段会被忽略）。
+pub fn build_compact(
+    model: u32,
+    generation: u64,
+    sections: &[Section],
+) -> Result<Vec<u8>, String> {
+    let filtered: Vec<Section> = sections
+        .iter()
+        .filter(|s| s.tag != 0x0200)
+        .map(|s| Section {
+            tag: s.tag,
+            data: s.data.clone(),
+        })
+        .collect();
+    assemble(model, generation, &filtered, COMPACT_SIZE)
+}
+
+/// 按段列表生成段表。完整镜像的校验走 `summary()`；紧凑镜像等无法整镜像
+/// 校验的场景用本函数直接从段数据生成展示信息。
+pub fn summarize_sections(sections: &[Section]) -> Result<Vec<SummaryEntry>, String> {
+    let mut entries: Vec<SummaryEntry> = sections
+        .iter()
+        .map(|s| {
+            let spec = spec(s.tag)?;
+            Ok(SummaryEntry {
+                name: spec.name,
+                offset: spec.offset,
+                size: s.data.len() as u32,
+                crc: zlib(&s.data),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_by_key(|e| e.offset);
+    Ok(entries)
 }
 
 pub struct SummaryEntry {
@@ -215,5 +271,55 @@ mod tests {
             &[Section { tag: 0x0012, data: vec![0x41; 4] }]
         )
         .is_err());
+    }
+
+    #[test]
+    fn compact_image_layout_and_crc() {
+        let sections = [
+            Section { tag: 0x0002, data: vec![1, 2, 3, 4, 5, 6] },
+            Section { tag: 0x0010, data: b"TYZDD0046AB9\0".to_vec() },
+        ];
+        let image = build_compact(MODEL_TYFZA1, 7, &sections).unwrap();
+        assert_eq!(image.len(), COMPACT_SIZE);
+        assert_eq!(&image[0..8], MAGIC);
+        assert_eq!(
+            u32::from_le_bytes(image[12..16].try_into().unwrap()),
+            COMPACT_SIZE as u32
+        );
+        // FPGA 段被忽略：传入与否结果一致
+        let with_fpga = build_compact(
+            MODEL_TYFZA1,
+            7,
+            &[
+                Section { tag: 0x0200, data: vec![0xaa; 64] },
+                Section { tag: 0x0002, data: vec![1, 2, 3, 4, 5, 6] },
+                Section { tag: 0x0010, data: b"TYZDD0046AB9\0".to_vec() },
+            ],
+        )
+        .unwrap();
+        assert_eq!(image, with_fpga);
+        // CRC 链与完整镜像同规则：整镜像 / 目录
+        let stored = u32::from_le_bytes(
+            image[IMAGE_CRC_OFFSET..IMAGE_CRC_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let mut probe = image.clone();
+        probe[IMAGE_CRC_OFFSET..IMAGE_CRC_OFFSET + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(register(&probe, SEED), stored);
+        assert_eq!(
+            register(&image[DIR_OFFSET..DIR_OFFSET + DIR_COUNT * ENTRY_SIZE], SEED),
+            u32::from_le_bytes(image[TABLE_CRC_OFFSET..TABLE_CRC_OFFSET + 4].try_into().unwrap())
+        );
+        assert_eq!(image[0x1010..0x1016], [1, 2, 3, 4, 5, 6]);
+        assert_eq!(image[0x1020..0x1020 + 13], b"TYZDD0046AB9\0");
+        // summarize_sections 与 summary 的段表一致（对完整镜像而言）
+        let full = build(MODEL_TYFZA1, 0, &sections).unwrap();
+        let from_summary = summary(&full).unwrap();
+        let from_sections = summarize_sections(&sections).unwrap();
+        assert_eq!(from_summary.len(), from_sections.len());
+        for (x, y) in from_summary.iter().zip(from_sections.iter()) {
+            assert_eq!((x.name, x.offset, x.size, x.crc), (y.name, y.offset, y.size, y.crc));
+        }
     }
 }

@@ -211,8 +211,9 @@ impl App {
         }
     }
 
-    /// 生成 factory.bin（等价于 CLI 的 build 流程），弹出保存对话框。
-    fn build_image(&mut self) {
+    /// 生成镜像（等价于 CLI 的 build 流程），弹出保存对话框。
+    /// `compact=true` 时输出 64 KiB 紧凑镜像（布局/CRC 与完整镜像一致，不含 FPGA）。
+    fn build_image(&mut self, compact: bool) {
         let Some(Ok(ext)) = self.result.as_ref() else {
             return;
         };
@@ -222,25 +223,33 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let bin = layout::build(self.model.id(), generation, &sections)?;
-            let entries = layout::summary(&bin)?;
+            let (bin, entries) = if compact {
+                let bin = layout::build_compact(self.model.id(), generation, &sections)?;
+                let entries = layout::summarize_sections(&sections)?;
+                (bin, entries)
+            } else {
+                let bin = layout::build(self.model.id(), generation, &sections)?;
+                let entries = layout::summary(&bin)?;
+                (bin, entries)
+            };
             // 保存对话框被取消时不算错误：段表仍然展示，只是不落盘。
-            let saved_to = FileDialog::new()
-                .set_file_name(format!("factory-{}.bin", self.model.key()))
-                .save_file();
+            let name = if compact {
+                format!("factory-{}-compact.bin", self.model.key())
+            } else {
+                format!("factory-{}.bin", self.model.key())
+            };
+            let saved_to = FileDialog::new().set_file_name(name).save_file();
             if let Some(target) = &saved_to {
                 std::fs::write(target, &bin).map_err(|e| format!("写入失败: {e}"))?;
             }
             Ok(BuildOut { entries, saved_to })
         })();
+        let kind = if compact { "64 KiB 紧凑镜像（不含 FPGA）" } else { "8 MiB factory.bin" };
         self.build_out = Some(match res {
             Ok(out) => {
                 self.status = match &out.saved_to {
-                    Some(p) => format!(
-                        "已生成 8 MiB factory.bin -> {}",
-                        p.display()
-                    ),
-                    None => "已生成 8 MiB factory.bin（未保存，重新点生成可保存）".into(),
+                    Some(p) => format!("已生成 {} -> {}", kind, p.display()),
+                    None => format!("已生成 {}（未保存，重新点生成可保存）", kind),
                 };
                 Ok(out)
             }
@@ -274,7 +283,13 @@ impl App {
                     .add_enabled(ready, egui::Button::new("生成 factory.bin…"))
                     .clicked()
                 {
-                    self.build_image();
+                    self.build_image(false);
+                }
+                if ui
+                    .add_enabled(ready, egui::Button::new("导出紧凑镜像 (64 KiB)…"))
+                    .clicked()
+                {
+                    self.build_image(true);
                 }
                 if self.busy {
                     ui.spinner();

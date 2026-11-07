@@ -22,6 +22,24 @@ RTL9617C 平台 Factory 镜像生成工具的 **Rust + egui 图形版**，逻辑
 生成的 bin 由 U-Boot 写入 UBI static 卷 `factory`（`ubiupdatevol` 或
 `ubi write`），镜像格式规范见上游 README。
 
+## 紧凑镜像（64 KiB，不含 FPGA）
+
+完整 8 MiB 镜像里 FPGA 卷独占约 4.1 MiB，且身份/校准字段全部位于 `0x10000`
+之前。为此提供**紧凑镜像**导出（`64 KiB` = `0x10000`）：
+
+- 布局、目录、CRC 链（`image_crc` / `table_crc` / `header_crc`）与完整镜像
+  **完全同规则**，仅 `image_size` 字段为 `0x00010000`，且无 `FPGA_IMAGE` 段；
+- 适合小体积留存身份数据与校准数据（MAC / SN / Wi-Fi TYFC0003 / BOSA /
+  xtemp），便于对照与二次开发；
+- **不可直接刷写**：恢复到设备请用完整 8 MiB 镜像整体写入 `factory` 卷。
+
+```bash
+# CLI
+rtl9617c-factory build --model tyfza1 --env mtd1_env.bin --env2 mtd2_env2.bin \
+    --device mtd4_ubi_device.bin --compact -o factory-compact.bin
+# GUI：顶栏「导出紧凑镜像 (64 KiB)…」
+```
+
 ## 构建
 
 需要 Rust 工具链（rustup）；Windows 上还需要 **MSVC Build Tools**（提供
@@ -37,6 +55,7 @@ cargo build --release
 |---|---|
 | `rtl9617c-factory-gui.exe` | 图形界面（release 下无控制台窗口） |
 | `rtl9617c-factory.exe` | 原上游 CLI（build / dump） |
+| `rtl9617c-factory-inspect.exe` | 备份分析：打印 MAC/SN/校准的实际值与出处 |
 
 Linux 构建需窗口后端：`cargo build --release --features linux-x11`。
 
@@ -67,6 +86,13 @@ CLI 用法与上游一致：
 rtl9617c-factory build --model tyfza1 --env mtd1_env.bin --env2 mtd2_env2.bin \
     --device mtd4_ubi_device.bin -o factory.bin
 rtl9617c-factory dump  --model tyfza1 --env mtd1_env.bin --device mtd4_ubi_device.bin
+```
+
+备份分析（打印 env 变量、UBI 卷、UBIFS 文件、XML 产线字段、校准内容，
+以及 Wi-Fi 校准块内嵌 MAC 的定位）：
+
+```bash
+rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin
 ```
 
 ## 与 CLI 的一致性
