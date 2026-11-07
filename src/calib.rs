@@ -17,14 +17,14 @@ pub const RADIO1_2G: Radio = Radio { wlan_index: 1, mac_offset: 1 };
 pub const RADIO0_2G: Radio = Radio { wlan_index: 0, mac_offset: 1 };
 pub const RADIO1_5G: Radio = Radio { wlan_index: 1, mac_offset: 2 };
 
-fn byte_field(hs: &str, key: &str) -> Result<u8, String> {
-    let value = field(hs, key)?;
-    let parsed = value
-        .trim()
-        .trim_start_matches("0x")
-        .parse::<u32>()
-        .map_err(|_| format!("invalid numeric field {key}: {value}"))?;
-    u8::try_from(parsed).map_err(|_| format!("field {key} out of byte range: {value}"))
+fn parse_num_field(value: &str, key: &str) -> Result<u32, String> {
+    // NV_CFG 带 `0x` 前缀的按十六进制，纯数字按十进制（XML 惯例）
+    let value = value.trim();
+    let parsed = match value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => value.parse::<u32>(),
+    };
+    parsed.map_err(|_| format!("invalid numeric field {key}: {value}"))
 }
 
 fn parse_hex_list(value: &str, key: &str) -> Result<Vec<u8>, String> {
@@ -34,11 +34,6 @@ fn parse_hex_list(value: &str, key: &str) -> Result<Vec<u8>, String> {
         .filter(|part| !part.is_empty())
         .map(|part| u8::from_str_radix(part.trim(), 16).map_err(|_| format!("invalid hex field {key}: {value}")))
         .collect()
-}
-
-fn hex_bytes_field(hs: &str, key: &str) -> Result<Vec<u8>, String> {
-    let value = field(hs, key)?;
-    parse_hex_list(&value, key)
 }
 
 fn mac_address(base: [u8; 6], offset: u32) -> [u8; 6] {
@@ -82,11 +77,7 @@ type FieldLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 fn byte_field_res(res: FieldLookup, key: &str) -> Result<u8, String> {
     let value = res(key).ok_or_else(|| format!("missing factory field: {key}"))?;
-    let parsed = value
-        .trim()
-        .trim_start_matches("0x")
-        .parse::<u32>()
-        .map_err(|_| format!("invalid numeric field {key}: {value}"))?;
+    let parsed = parse_num_field(&value, key)?;
     u8::try_from(parsed).map_err(|_| format!("field {key} out of byte range: {value}"))
 }
 
@@ -274,9 +265,17 @@ mod tests {
     fn hex_lists() {
         let doc = r#"<Value Name="HW_2G_CCK_TSSI_A" Value="fe,fe,09,04,04,04"/>"#;
         assert_eq!(
-            hex_bytes_field(doc, "HW_2G_CCK_TSSI_A").unwrap(),
+            parse_hex_list("fe,fe,09,04,04,04", "HW_2G_CCK_TSSI_A").unwrap(),
             vec![0xfe, 0xfe, 0x09, 0x04, 0x04, 0x04]
         );
+        // NV_CFG 空格分隔
+        assert_eq!(
+            parse_hex_list("08 08 07 00 00 00", "HW_2G_CCK_TSSI_A").unwrap(),
+            vec![0x08, 0x08, 0x07, 0x00, 0x00, 0x00]
+        );
+        // 数字字段：0x 前缀按十六进制，纯数字按十进制
+        assert_eq!(parse_num_field("0xFE", "K").unwrap(), 254);
+        assert_eq!(parse_num_field("237", "K").unwrap(), 237);
     }
 
     #[test]
