@@ -49,12 +49,14 @@ fn run(args: &[String]) -> Result<String, String> {
                 calib::validate_a2h_dump(&data)?;
                 sections.push(layout::Section { tag: 0x0102, data });
             }
-            // 可选：pt1570 mtd3 的 NV_CFG 原样存档（Wi-Fi 校准字段，不组装）
+            // 可选：pt1570 mtd3 的 NV_CFG 原样存档（Wi-Fi 校准字段，不组装）；
+            // 接受裸段或整个 mtd3 分区镜像（自动裁剪头部 NV_CFG）
             if let Some(i) = args.iter().position(|a| a == "--wifi-nvcfg") {
                 let path = args.get(i + 1).ok_or("--wifi-nvcfg requires a file")?;
                 let data = read_file(path)?;
-                calib::validate_nv_cfg(&data)?;
-                sections.push(layout::Section { tag: 0x0103, data });
+                let blob = calib::normalize_nv_cfg(&data)?;
+                calib::validate_nv_cfg(&blob)?;
+                sections.push(layout::Section { tag: 0x0103, data: blob });
             }
             let generation = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

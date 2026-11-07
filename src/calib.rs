@@ -130,7 +130,36 @@ pub fn validate_a2h_dump(data: &[u8]) -> Result<(), String> {
 /// WIFI_NV_CFG 段（tag 0x0103）的容量上限（PT1570 实测 598 字节，留余量）。
 pub const NV_CFG_MAX: usize = 0x400;
 
-/// 校验 mtd3_static_conf 的 NV_CFG 转储：魔数 `72 D6 EF 41` + `/** NV_CFG **/`
+/// 归一化 NV_CFG 输入：接受**裸 NV_CFG 段**或**整个 mtd3-static_conf 分区镜像**
+/// （256 KiB，NV_CFG 在头部，其后为 0x00 填充）。返回裁掉尾部 0x00 填充后的
+/// NV_CFG 段（含魔数与标记）。字段为 ASCII 文本（无内嵌 NUL），按最后一个
+/// 非 0 字节截断是安全的。
+pub fn normalize_nv_cfg(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() < 21 {
+        return Err("NV_CFG dump too small (< 21 bytes)".into());
+    }
+    if data[0..4] != [0x72, 0xd6, 0xef, 0x41] {
+        return Err("NV_CFG magic mismatch (expect 72 D6 EF 41 at offset 0)".into());
+    }
+    if &data[4..21] != b"\x13/** NV_CFG **/\n\x00" {
+        return Err("NV_CFG marker mismatch (expect /** NV_CFG **/)".into());
+    }
+    let end = data
+        .iter()
+        .rposition(|&b| b != 0)
+        .map_or(21, |i| i + 1)
+        .max(21);
+    if end > NV_CFG_MAX {
+        return Err(format!(
+            "NV_CFG section too large: {} > {} bytes",
+            end,
+            NV_CFG_MAX
+        ));
+    }
+    Ok(data[..end].to_vec())
+}
+
+/// 校验已归一化的 NV_CFG 段：魔数 `72 D6 EF 41` + `/** NV_CFG **/`
 /// 标记。PT1570 实测布局：魔数(4B) + 0x13 + "/** NV_CFG **/\n" + NUL +
 /// `KEY=VALUE` 列表（NUL 分隔）。整段原样存档，不解析不重组。
 pub fn validate_nv_cfg(data: &[u8]) -> Result<(), String> {
@@ -178,7 +207,7 @@ mod tests {
         let mut d = vec![0x72, 0xd6, 0xef, 0x41];
         d.extend_from_slice(b"\x13/** NV_CFG **/\n\x00HW_X=1\0");
         assert!(validate_nv_cfg(&d).is_ok());
-        // 不足 20 字节：跳过魔数校验（部分转储）
+        // 不足 21 字节：跳过魔数校验（部分转储）
         assert!(validate_nv_cfg(&d[..15]).is_ok());
         let mut bad_magic = d.clone();
         bad_magic[0] = 0x00;
@@ -187,6 +216,27 @@ mod tests {
         bad_marker[4] = 0x00;
         assert!(validate_nv_cfg(&bad_marker).is_err());
         assert!(validate_nv_cfg(&vec![0u8; 0x401]).is_err());
+    }
+
+    #[test]
+    fn nv_cfg_normalize_partition_image() {
+        // 整个 mtd3 分区镜像：NV_CFG 在头部（598 字节），其后全 0x00 填充
+        let mut part = vec![0x72, 0xd6, 0xef, 0x41];
+        part.extend_from_slice(b"\x13/** NV_CFG **/\n\x00HW_A=1\0HW_B=2\0");
+        let blob_len = part.len();
+        part.resize(262144, 0x00);
+        let blob = normalize_nv_cfg(&part).unwrap();
+        assert_eq!(blob.len(), blob_len);
+        assert_eq!(&blob[..21], &b"\x72\xd6\xef\x41\x13/** NV_CFG **/\n\x00"[..]);
+        assert!(validate_nv_cfg(&blob).is_ok());
+        // 裸段原样通过
+        let bare = normalize_nv_cfg(&part[..blob_len]).unwrap();
+        assert_eq!(bare, blob);
+        // 魔数不对拒绝
+        let mut bad = part.clone();
+        bad[0] = 0x00;
+        assert!(normalize_nv_cfg(&bad).is_err());
+        assert!(normalize_nv_cfg(&vec![0u8; 100]).is_err());
     }
 
     #[test]

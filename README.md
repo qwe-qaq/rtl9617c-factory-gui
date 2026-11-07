@@ -182,9 +182,11 @@ Wi-Fi 校准段是原厂 `factory.uc` 组装格式的逐字节移植，字段全
 > `KEY=VALUE\0` 列表，实测 19 个字段：gaingap×5、thermal×2×2、xcap×2、TSSI 表×6），
 > 但**缺少第 6/7 步的 TSSI GAIN/CW DIFF 字段**，无法按原厂格式完整组装，故工具
 > 不生成（不猜数据）。NV_CFG 可**整段原样存档**进 factory.bin：tag `0x0103`
-> `WIFI_NV_CFG`（偏移 `0x7000`，容量 `0x400`）——GUI「Wi-Fi NV_CFG (mtd3)」行
-> 载入，CLI `--wifi-nvcfg <file>`，载入时校验魔数 `72 D6 EF 41` + `/** NV_CFG **/`
-> 标记；WLAN 驱动直接读 NV 分区（推定），此段为存档用途。另注意 PT1570 的 wlan
+> `WIFI_NV_CFG`（偏移 `0x7000`，容量 `0x400`）——GUI「Wi-Fi NV_CFG（导入
+> mtd3-static_conf.bin）」行导入或直接拖进窗口，CLI `--wifi-nvcfg <file>`；
+> **接受裸 NV_CFG 段或整个 256 KiB 分区镜像**（自动裁剪头部 NV_CFG、去除尾部
+> 0x00 填充），校验魔数 `72 D6 EF 41` + `/** NV_CFG **/` 标记；WLAN 驱动直接读
+> NV 分区（推定），此段为存档用途。另注意 PT1570 的 wlan
 > 映射与 tyfza1 **相反**（`HW_WLAN0_FEM_TYPE=17`=2G、`HW_WLAN1_FEM_TYPE=238`=5G），
 > mtd4 日志显示其 2G 芯片同为 `rtl8192xbe`、参数从 rootfs `/etc/conf/rtl8192xbe/...` 下载。
 

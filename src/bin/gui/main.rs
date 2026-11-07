@@ -511,22 +511,28 @@ impl App {
                     }
                     if ui.button("导入…").clicked() {
                         if let Some(p) = FileDialog::new()
-                            .add_filter("NV_CFG 转储", &["bin", "conf"])
+                            .add_filter("NV_CFG 转储 / mtd3 分区镜像", &["bin", "conf"])
                             .pick_file()
                         {
                             match std::fs::read(&p) {
-                                Ok(data) => match calib::validate_nv_cfg(&data) {
-                                    Ok(()) => {
-                                        let n = String::from_utf8_lossy(&data)
+                                Ok(data) => match calib::normalize_nv_cfg(&data) {
+                                    Ok(blob) => {
+                                        let n = String::from_utf8_lossy(&blob)
                                             .split('\0')
                                             .filter(|s| s.contains('='))
                                             .count();
+                                        let note = if data.len() != blob.len() {
+                                            format!("（已从 {} 字节分区镜像裁剪）", data.len())
+                                        } else {
+                                            String::new()
+                                        };
                                         self.status = format!(
-                                            "已导入 Wi-Fi NV_CFG: {} 字节 · {} 个字段（魔数校验通过）",
-                                            data.len(),
-                                            n
+                                            "已导入 Wi-Fi NV_CFG: {} 字节 · {} 个字段{}",
+                                            blob.len(),
+                                            n,
+                                            note
                                         );
-                                        self.wifi_nvcfg = Some(data);
+                                        self.wifi_nvcfg = Some(blob);
                                     }
                                     Err(e) => self.status = format!("导入被拒: {e}"),
                                 },
@@ -732,12 +738,26 @@ impl App {
                 reextract = true;
             } else if name.contains("static_conf") || name.contains("nvcfg") {
                 // pt1570 的 mtd3-static_conf.bin：Wi-Fi NV_CFG 存档槽
+                // （接受裸段或整个 256 KiB 分区镜像，自动裁剪）
                 match std::fs::read(&path) {
-                    Ok(data) => match calib::validate_nv_cfg(&data) {
-                        Ok(()) => {
-                            self.wifi_nvcfg = Some(data);
-                            self.status =
-                                "已导入 Wi-Fi NV_CFG（拖拽）· 魔数校验通过".into();
+                    Ok(data) => match calib::normalize_nv_cfg(&data) {
+                        Ok(blob) => {
+                            let n = String::from_utf8_lossy(&blob)
+                                .split('\0')
+                                .filter(|s| s.contains('='))
+                                .count();
+                            let note = if data.len() != blob.len() {
+                                format!("（已从 {} 字节分区镜像裁剪）", data.len())
+                            } else {
+                                String::new()
+                            };
+                            self.status = format!(
+                                "已导入 Wi-Fi NV_CFG（拖拽）: {} 字节 · {} 个字段{}",
+                                blob.len(),
+                                n,
+                                note
+                            );
+                            self.wifi_nvcfg = Some(blob);
                         }
                         Err(e) => self.status = format!("拖拽被拒（NV_CFG 校验失败）: {e}"),
                     },
