@@ -442,7 +442,7 @@ impl App {
                             }
                         }
                     }
-                    if ui.button("载入…").clicked() {
+                    if ui.button("导入…").clicked() {
                         if let Some(p) = FileDialog::new()
                             .add_filter("EEPROM 转储", &["bin", "dump"])
                             .pick_file()
@@ -451,12 +451,12 @@ impl App {
                                 Ok(data) => match calib::validate_a2h_dump(&data) {
                                     Ok(()) => {
                                         self.status = format!(
-                                            "已载入 PON EEPROM 转储: {} 字节（校验和通过）",
+                                            "已导入 PON EEPROM 转储: {} 字节（校验和通过）",
                                             data.len()
                                         );
                                         self.pon_eeprom = Some(data);
                                     }
-                                    Err(e) => self.status = format!("载入被拒: {e}"),
+                                    Err(e) => self.status = format!("导入被拒: {e}"),
                                 },
                                 Err(e) => self.status = format!("读取失败: {e}"),
                             }
@@ -473,12 +473,21 @@ impl App {
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.strong("Wi-Fi NV_CFG (mtd3)");
+                ui.strong("Wi-Fi NV_CFG（导入 mtd3-static_conf.bin）");
                 ui.weak("pt1570 Wi-Fi 校准字段 · 缺 DIFF 不组装 · 原样存档");
-                match &self.wifi_nvcfg {
-                    Some(d) => ui.weak(format!("已载入 {} 字节", d.len())),
+                let status = match &self.wifi_nvcfg {
+                    Some(d) => {
+                        let n = String::from_utf8_lossy(d)
+                            .split('\0')
+                            .filter(|s| s.contains('='))
+                            .count();
+                        let preview = String::from_utf8_lossy(&d[..d.len().min(600)]).to_string();
+                        ui.weak(format!("已载入 {} 字节 · {} 个字段", d.len(), n))
+                            .on_hover_text(preview)
+                    }
                     None => ui.weak("未提供"),
                 };
+                drop(status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.wifi_nvcfg.is_some() && ui.button("清除").clicked() {
                         self.wifi_nvcfg = None;
@@ -500,7 +509,7 @@ impl App {
                             }
                         }
                     }
-                    if ui.button("载入…").clicked() {
+                    if ui.button("导入…").clicked() {
                         if let Some(p) = FileDialog::new()
                             .add_filter("NV_CFG 转储", &["bin", "conf"])
                             .pick_file()
@@ -508,13 +517,18 @@ impl App {
                             match std::fs::read(&p) {
                                 Ok(data) => match calib::validate_nv_cfg(&data) {
                                     Ok(()) => {
+                                        let n = String::from_utf8_lossy(&data)
+                                            .split('\0')
+                                            .filter(|s| s.contains('='))
+                                            .count();
                                         self.status = format!(
-                                            "已载入 Wi-Fi NV_CFG: {} 字节（魔数校验通过）",
-                                            data.len()
+                                            "已导入 Wi-Fi NV_CFG: {} 字节 · {} 个字段（魔数校验通过）",
+                                            data.len(),
+                                            n
                                         );
                                         self.wifi_nvcfg = Some(data);
                                     }
-                                    Err(e) => self.status = format!("载入被拒: {e}"),
+                                    Err(e) => self.status = format!("导入被拒: {e}"),
                                 },
                                 Err(e) => self.status = format!("读取失败: {e}"),
                             }
@@ -704,6 +718,7 @@ impl App {
         if dropped.is_empty() {
             return;
         }
+        let mut reextract = false;
         for path in dropped {
             let name = path
                 .file_name()
@@ -711,14 +726,44 @@ impl App {
                 .unwrap_or_default();
             if name.contains("env2") {
                 self.env2_path = Some(path);
+                reextract = true;
             } else if name.contains("env") {
                 self.env_path = Some(path);
+                reextract = true;
+            } else if name.contains("static_conf") || name.contains("nvcfg") {
+                // pt1570 的 mtd3-static_conf.bin：Wi-Fi NV_CFG 存档槽
+                match std::fs::read(&path) {
+                    Ok(data) => match calib::validate_nv_cfg(&data) {
+                        Ok(()) => {
+                            self.wifi_nvcfg = Some(data);
+                            self.status =
+                                "已导入 Wi-Fi NV_CFG（拖拽）· 魔数校验通过".into();
+                        }
+                        Err(e) => self.status = format!("拖拽被拒（NV_CFG 校验失败）: {e}"),
+                    },
+                    Err(e) => self.status = format!("读取失败: {e}"),
+                }
+            } else if name.contains("a2h") || name.contains("eeprom") {
+                // 光模块 A2h 转储：PON EEPROM 存档槽
+                match std::fs::read(&path) {
+                    Ok(data) => match calib::validate_a2h_dump(&data) {
+                        Ok(()) => {
+                            self.pon_eeprom = Some(data);
+                            self.status = "已导入 PON EEPROM 转储（拖拽）· 校验和通过".into();
+                        }
+                        Err(e) => self.status = format!("拖拽被拒（A2h 校验失败）: {e}"),
+                    },
+                    Err(e) => self.status = format!("读取失败: {e}"),
+                }
             } else {
                 self.device_path = Some(path);
+                reextract = true;
             }
         }
-        let ctx2 = ctx.clone();
-        self.start_extract(&ctx2);
+        if reextract {
+            let ctx2 = ctx.clone();
+            self.start_extract(&ctx2);
+        }
     }
 }
 
