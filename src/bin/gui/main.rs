@@ -87,8 +87,8 @@ struct SectionRow {
 }
 
 const SECTION_ROWS: &[SectionRow] = &[
-    SectionRow { tag: 0x0100, name: "WIFI_CAL_RADIO0", title: "5G Wi-Fi 校准", note: "config_hs.xml HW_* 组装 TYFC0003 · rtl8852ce · 内嵌 MAC base+2", file_name: "wifi-cal-radio0.bin" },
-    SectionRow { tag: 0x0101, name: "WIFI_CAL_RADIO1", title: "2.4G Wi-Fi 校准", note: "config_hs.xml HW_* 组装 TYFC0003 · rtl8192xbe · 内嵌 MAC base+1", file_name: "wifi-cal-radio1.bin" },
+    SectionRow { tag: 0x0100, name: "WIFI_CAL_RADIO0", title: "5G Wi-Fi 校准", note: "HW_* 字段组装 TYFC0003 · 内嵌 MAC base+2", file_name: "wifi-cal-radio0.bin" },
+    SectionRow { tag: 0x0101, name: "WIFI_CAL_RADIO1", title: "2.4G Wi-Fi 校准", note: "HW_* 字段组装 TYFC0003 · 内嵌 MAC base+1", file_name: "wifi-cal-radio1.bin" },
     SectionRow { tag: 0x0110, name: "BOSA_CALIBRATION", title: "上行 PON 校准", note: "rtkbosa_k.bin · PON 上行口 BOSA 光模块", file_name: "rtkbosa_k.bin" },
     SectionRow { tag: 0x0111, name: "BOSA_OLT_CALIBRATION", title: "下行 PON 校准", note: "rtkoltbosa_k.bin · 下行 OLT 光口 BOSA", file_name: "rtkoltbosa_k.bin" },
     SectionRow { tag: 0x0112, name: "XTEMP_CALIBRATION", title: "XTEMP 校准", note: "xtemp.cal · JSON 文本", file_name: "xtemp.cal" },
@@ -195,6 +195,7 @@ impl App {
         };
         let env = self.env_path.clone();
         let env2 = self.env2_path.clone();
+        let nv = self.wifi_nvcfg.clone();
         let model = self.model;
         if model.needs_env() && env.is_none() {
             self.status = "该机型需要 U-Boot env 分区（mtd1_env.bin）".into();
@@ -209,7 +210,7 @@ impl App {
             format!("正在解析（env / UBI 容器 / UBIFS），机型 {} …", model.label());
         let ctx2 = ctx.clone();
         std::thread::spawn(move || {
-            let out = run_extract(model, env, env2, device);
+            let out = run_extract(model, env, env2, device, nv);
             let _ = tx.send(out);
             ctx2.request_repaint();
         });
@@ -474,7 +475,7 @@ impl App {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.strong("Wi-Fi NV_CFG（导入 mtd3-static_conf.bin）");
-                ui.weak("pt1570 Wi-Fi 校准字段 · 缺 DIFF 不组装 · 原样存档");
+                ui.weak("pt1570 Wi-Fi 校准字段 · DIFF 按产线惯例补 0 组装 · 并存原档");
                 let status = match &self.wifi_nvcfg {
                     Some(d) => {
                         let n = String::from_utf8_lossy(d)
@@ -829,11 +830,13 @@ fn source_row(
 }
 
 /// 后台线程执行的完整提取流程（与 CLI dump 逻辑一致）。
+/// `nv` 为 pt1570 的 mtd3 NV_CFG 转储（可选）——组装 Wi-Fi 校准（0x0100/0x0101）。
 fn run_extract(
     model: Model,
     env: Option<PathBuf>,
     env2: Option<PathBuf>,
     device: PathBuf,
+    nv: Option<Vec<u8>>,
 ) -> Result<Extraction, String> {
     let read = |p: &PathBuf| -> Result<Vec<u8>, String> {
         std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()))
@@ -854,14 +857,30 @@ fn run_extract(
         let refs: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
         envmod::load(&refs)?
     } else {
-        // tyfza1 不读 env；给一个空 EnvSet 即可（字段全 pub）。
+        // tyfza1 / pt1570-r10 不读 env；给一个空 EnvSet 即可（字段全 pub）。
         envmod::EnvSet {
             variables: Default::default(),
         }
     };
 
     let image = ubi::parse(&device_bytes)?;
-    let extracted = profile::profile(model.key())?(&envset, &image)?;
+    let mut extracted = profile::profile(model.key())?(&envset, &image)?;
+    // pt1570：用导入的 NV_CFG 组装 Wi-Fi 校准。5G=wlan1=base+2、2G=wlan0=base+1
+    // （实机日志 hwaddr 证据），DIFF 字段缺失按产线惯例（实机全 0）补齐。
+    if model == Model::Pt1570 {
+        if let Some(nv) = &nv {
+            let text =
+                String::from_utf8(nv.clone()).map_err(|_| "NV_CFG 不是 ASCII 文本".to_string())?;
+            let base = extracted
+                .identity
+                .base_mac
+                .ok_or("NV_CFG 组装需要 BASE_MAC")?;
+            extracted.wifi0 =
+                Some(calib::flash_calibration_nv(&text, &calib::RADIO1_5G, base)?);
+            extracted.wifi1 =
+                Some(calib::flash_calibration_nv(&text, &calib::RADIO0_2G, base)?);
+        }
+    }
     Ok(Extraction {
         ubi_peb: image.peb_size,
         ubi_leb: image.leb_size,

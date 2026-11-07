@@ -12,7 +12,7 @@ Rust + egui 图形工具，用于**提取 / 生成 / 对照** RTL9617C 平台 GP
 |---|---|---|---|---|
 | **tyfza1** | 天邑 TYFZA1（Wi-Fi + 下行光 + FPGA） | `ubi_Config` 卷内 XML/校准文件 + `ubi_fpga` 卷 | 有（flash 内，`rtkbosa_k.bin`） | 64 KiB，`RTLFACT1`（无 FPGA） |
 | **pt1500-h10** | 友华 PT1500-H10（无 Wi-Fi / 无下行光） | U-Boot env `kp_*` keyparam | **无**（在光模块 EEPROM） | 同上 |
-| **pt1570** | 友华 PT1570-H10（Wi-Fi 校准在 mtd3 NV_CFG，不足以组装 TYFC0003） | 同上（另有整机 SN `kp_szSerialNumber`） | **无**（在光模块 EEPROM） | 同上 |
+| **pt1570** | 友华 PT1570-H10（Wi-Fi 校准在 mtd3 NV_CFG，DIFF 缺失按产线惯例补 0 组装） | 同上（另有整机 SN `kp_szSerialNumber`） | **无**（在光模块 EEPROM） | 同上 |
 | **pt1570-r10** | 友华 PT1570-R10（新一代固件：env 无 `kp_*`，数据回归 ubi_Config 卷 XML） | `ubi_Config` 卷 `config_hs.xml`/`config.xml`（同 tyfza1，含完整 Wi-Fi 校准字段） | **无**（在光模块 EEPROM） | 同上 |
 
 > ⚠️ **重要声明**
@@ -180,15 +180,19 @@ Wi-Fi 校准段是原厂 `factory.uc` 组装格式的逐字节移植，字段全
 
 > ⚠️ **PT1570 的 Wi-Fi 校准字段在 `mtd3_static_conf.bin`**（`/** NV_CFG **/` +
 > `KEY=VALUE\0` 列表，实测 19 个字段：gaingap×5、thermal×2×2、xcap×2、TSSI 表×6），
-> 但**缺少第 6/7 步的 TSSI GAIN/CW DIFF 字段**，无法按原厂格式完整组装，故工具
-> 不生成（不猜数据）。NV_CFG 可**整段原样存档**进 factory.bin：tag `0x0103`
-> `WIFI_NV_CFG`（偏移 `0x7000`，容量 `0x400`）——GUI「Wi-Fi NV_CFG（导入
-> mtd3-static_conf.bin）」行导入或直接拖进窗口，CLI `--wifi-nvcfg <file>`；
-> **接受裸 NV_CFG 段或整个 256 KiB 分区镜像**（自动裁剪头部 NV_CFG、去除尾部
-> 0x00 填充），校验魔数 `72 D6 EF 41` + `/** NV_CFG **/` 标记；WLAN 驱动直接读
-> NV 分区（推定），此段为存档用途。另注意 PT1570 的 wlan
-> 映射与 tyfza1 **相反**（`HW_WLAN0_FEM_TYPE=17`=2G、`HW_WLAN1_FEM_TYPE=238`=5G），
-> mtd4 日志显示其 2G 芯片同为 `rtl8192xbe`、参数从 rootfs `/etc/conf/rtl8192xbe/...` 下载。
+> **缺少 TSSI GAIN/CW DIFF 字段**。实测两台真机（tyfza1 的 config_hs.xml 与 R10 的
+> 同名字段）这些 DIFF **全部为 0**，故组装时按同频段 TSSI 表长度**补 0**（与产线
+> 惯例一致，长度恰好逐一对齐：2G_CCK=6、2G=5、5G=14）；NV_CFG 同时**整段原样
+> 存档**：tag `0x0103` `WIFI_NV_CFG`（偏移 `0x7000`，容量 `0x400`）——GUI
+> 「Wi-Fi NV_CFG（导入 mtd3-static_conf.bin）」行导入或直接拖进窗口，CLI
+> `--wifi-nvcfg <file>`；**接受裸 NV_CFG 段或整个 256 KiB 分区镜像**（自动裁剪
+> 头部 NV_CFG、去除尾部 0x00 填充），校验魔数 `72 D6 EF 41` + `/** NV_CFG **/`
+> 标记。
+>
+> **wlan 频段绑定（实机日志证据）**：PT1570-H10 的 mtd4 运行日志
+> `hwaddr=68:7D:00:5A:19:C0 ifname=wlan1`（=base+2）、
+> `hwaddr=68:7D:00:5A:19:BF ifname=wlan0`（=base+1）→ **wlan1=5G、wlan0=2G**
+> （与 tyfza1 相反）。2G 芯片同为 `rtl8192xbe`。
 
 ## PON 模块 EEPROM（A2h）存档（tag 0x0102，本仓新增）
 

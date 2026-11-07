@@ -1,11 +1,21 @@
 use crate::xml::{field, optional_field};
 
+/// 组装一台 radio 的 TYFC0003 所需的定位参数：
+/// - `wlan_index`：THERMAL/XCAP 字段名里的 WLAN 编号；
+/// - `mac_offset`：内嵌 MAC 相对 BASE_MAC 的偏移（**按频段**：5G=+2，2G=+1，
+///   与 wlan 编号无关——PT1570-H10 实机日志 `hwaddr=…19:C0 ifname=wlan1`、
+///   `hwaddr=…19:BF ifname=wlan0` 证实）。
 pub struct Radio {
     pub wlan_index: u32,
+    pub mac_offset: u32,
 }
 
-pub const RADIO0_5G: Radio = Radio { wlan_index: 0 };
-pub const RADIO1_2G: Radio = Radio { wlan_index: 1 };
+/// tyfza1 / PT1570-R10：wlan0=5G、wlan1=2G。
+pub const RADIO0_5G: Radio = Radio { wlan_index: 0, mac_offset: 2 };
+pub const RADIO1_2G: Radio = Radio { wlan_index: 1, mac_offset: 1 };
+/// PT1570-H10：wlan0=2G、wlan1=5G（实机日志 + NV_CFG 字段分组双重印证）。
+pub const RADIO0_2G: Radio = Radio { wlan_index: 0, mac_offset: 1 };
+pub const RADIO1_5G: Radio = Radio { wlan_index: 1, mac_offset: 2 };
 
 fn byte_field(hs: &str, key: &str) -> Result<u8, String> {
     let value = field(hs, key)?;
@@ -17,12 +27,18 @@ fn byte_field(hs: &str, key: &str) -> Result<u8, String> {
     u8::try_from(parsed).map_err(|_| format!("field {key} out of byte range: {value}"))
 }
 
-fn hex_bytes_field(hs: &str, key: &str) -> Result<Vec<u8>, String> {
-    let value = field(hs, key)?;
+fn parse_hex_list(value: &str, key: &str) -> Result<Vec<u8>, String> {
+    // XML 用逗号分隔，NV_CFG 用空格分隔——两者都接受
     value
-        .split(',')
+        .split([',', ' '])
+        .filter(|part| !part.is_empty())
         .map(|part| u8::from_str_radix(part.trim(), 16).map_err(|_| format!("invalid hex field {key}: {value}")))
         .collect()
+}
+
+fn hex_bytes_field(hs: &str, key: &str) -> Result<Vec<u8>, String> {
+    let value = field(hs, key)?;
+    parse_hex_list(&value, key)
 }
 
 fn mac_address(base: [u8; 6], offset: u32) -> [u8; 6] {
@@ -44,6 +60,56 @@ fn mac_address(base: [u8; 6], offset: u32) -> [u8; 6] {
 }
 
 pub fn flash_calibration(hs: &str, radio: &Radio, base_mac: [u8; 6]) -> Result<Vec<u8>, String> {
+    flash_calibration_with(&|key| optional_field(hs, key), radio, base_mac)
+}
+
+/// 从 mtd3 NV_CFG（`KEY=VALUE\0` 列表，hex 为空格分隔）组装 PT1570-H10 的
+/// Wi-Fi 校准。字段语义与 XML 路径完全一致。
+pub fn flash_calibration_nv(nv: &str, radio: &Radio, base_mac: [u8; 6]) -> Result<Vec<u8>, String> {
+    flash_calibration_with(&|key| nv_field(nv, key), radio, base_mac)
+}
+
+fn nv_field<'a>(nv: &'a str, key: &str) -> Option<String> {
+    nv.split('\0').find_map(|entry| {
+        entry
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('=').map(str::to_string))
+    })
+}
+
+/// 字段查找器：XML 路径走 `optional_field`，NV_CFG 路径走 `nv_field`。
+type FieldLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+fn byte_field_res(res: FieldLookup, key: &str) -> Result<u8, String> {
+    let value = res(key).ok_or_else(|| format!("missing factory field: {key}"))?;
+    let parsed = value
+        .trim()
+        .trim_start_matches("0x")
+        .parse::<u32>()
+        .map_err(|_| format!("invalid numeric field {key}: {value}"))?;
+    u8::try_from(parsed).map_err(|_| format!("field {key} out of byte range: {value}"))
+}
+
+fn hex_bytes_res(res: FieldLookup, key: &str) -> Result<Vec<u8>, String> {
+    let value = res(key).ok_or_else(|| format!("missing factory field: {key}"))?;
+    parse_hex_list(&value, key)
+}
+
+/// TSSI DIFF 字段：**实测在真实设备上全为 0**（tyfza1 config_hs.xml 与
+/// R10 同名字段均为 `00,00,…`），缺失时按同频段 TSSI 表长度补 0——与
+/// 产线惯例一致，长度也恰好对齐（2G_CCK=6、2G=5、5G=14）。
+fn diff_res_or_zeros(res: FieldLookup, key: &str, len: usize) -> Result<Vec<u8>, String> {
+    match res(key) {
+        Some(value) => parse_hex_list(&value, key),
+        None => Ok(vec![0; len]),
+    }
+}
+
+fn flash_calibration_with(
+    res: FieldLookup,
+    radio: &Radio,
+    base_mac: [u8; 6],
+) -> Result<Vec<u8>, String> {
     let mut data = Vec::with_capacity(386);
     data.extend_from_slice(b"TYFC0003");
     for key in [
@@ -53,34 +119,47 @@ pub fn flash_calibration(hs: &str, radio: &Radio, base_mac: [u8; 6]) -> Result<V
         "HW_RX_GAINGAP_5GM_AB",
         "HW_RX_GAINGAP_5GH_AB",
     ] {
-        data.push(byte_field(hs, key)?);
+        data.push(byte_field_res(res, key)?);
     }
     for path in ["A", "B"] {
-        data.push(byte_field(hs, &format!("HW_THERMAL_{path}_WLAN{}", radio.wlan_index))?);
+        data.push(byte_field_res(
+            res,
+            &format!("HW_THERMAL_{path}_WLAN{}", radio.wlan_index),
+        )?);
     }
-    data.push(byte_field(hs, &format!("HW_XCAP_WLAN{}_AX", radio.wlan_index))?);
+    data.push(byte_field_res(
+        res,
+        &format!("HW_XCAP_WLAN{}_AX", radio.wlan_index),
+    )?);
     for band in ["2G_CCK", "2G_BW40_1S", "5G_BW40_1S"] {
         for path in ["A", "B"] {
-            data.extend_from_slice(&hex_bytes_field(hs, &format!("HW_{band}_TSSI_{path}"))?);
+            data.extend_from_slice(&hex_bytes_res(res, &format!("HW_{band}_TSSI_{path}"))?);
         }
     }
-    let address = mac_address(base_mac, 2 - radio.wlan_index);
+    let address = mac_address(base_mac, radio.mac_offset);
     data.extend_from_slice(&address);
+    // DIFF 数组长度 = 同频段 TSSI 表长度（逐载波修正，一一对应）
+    let len_2g_cck = hex_bytes_res(res, "HW_2G_CCK_TSSI_A")?.len();
+    let len_2g = hex_bytes_res(res, "HW_2G_BW40_1S_TSSI_A")?.len();
+    let len_5g = hex_bytes_res(res, "HW_5G_BW40_1S_TSSI_A")?.len();
     for kind in ["GAIN", "CW"] {
         for path in ["A", "B"] {
-            data.extend_from_slice(&hex_bytes_field(
-                hs,
+            data.extend_from_slice(&diff_res_or_zeros(
+                res,
                 &format!("HW_2G_CCK_TSSI_{kind}_DIFF_{path}"),
+                len_2g_cck,
             )?);
             for band in ["2G", "5G"] {
-                data.extend_from_slice(&hex_bytes_field(
-                    hs,
+                let len = if band == "2G" { len_2g } else { len_5g };
+                data.extend_from_slice(&diff_res_or_zeros(
+                    res,
                     &format!("HW_{band}_TSSI_{kind}_DIFF_{path}"),
+                    len,
                 )?);
             }
         }
     }
-    let slope = hex_bytes_field(hs, "HW_5G_TSSI_CW_DIFF_A")?;
+    let slope = diff_res_or_zeros(res, "HW_5G_TSSI_CW_DIFF_A", len_5g)?;
     let slope = *slope.last().ok_or("empty slope field")?;
     for seed in [0u8, slope] {
         for width in 0u8..4 {
@@ -198,6 +277,40 @@ mod tests {
             hex_bytes_field(doc, "HW_2G_CCK_TSSI_A").unwrap(),
             vec![0xfe, 0xfe, 0x09, 0x04, 0x04, 0x04]
         );
+    }
+
+    #[test]
+    fn flash_calibration_from_nv_cfg() {
+        // PT1570-H10 mtd3 NV_CFG 实测字段（0x 前缀 + 空格分隔 hex）
+        let nv = concat!(
+            "HW_RX_GAINGAP_2G_CCK_AB=0x60\0",
+            "HW_RX_GAINGAP_2G_OFDM_AB=0x60\0",
+            "HW_RX_GAINGAP_5GL_AB=0xFE\0",
+            "HW_RX_GAINGAP_5GM_AB=0xF0\0",
+            "HW_RX_GAINGAP_5GH_AB=0x00\0",
+            "HW_WLAN0_FEM_TYPE=17\0HW_WLAN1_FEM_TYPE=238\0",
+            "HW_THERMAL_A_WLAN1=32\0HW_THERMAL_B_WLAN1=32\0HW_XCAP_WLAN1_AX=100\0",
+            "HW_5G_BW40_1S_TSSI_A=FD FE FE FC 00 02 02 FD 00 04 06 03 03 07\0",
+            "HW_5G_BW40_1S_TSSI_B=00 00 FF FD 01 02 00 FA 00 04 05 02 01 05\0",
+            "HW_THERMAL_A_WLAN0=29\0HW_THERMAL_B_WLAN0=29\0HW_XCAP_WLAN0_AX=68\0",
+            "HW_2G_CCK_TSSI_A=08 08 07 00 00 00\0HW_2G_CCK_TSSI_B=FB FB FA F7 F7 F7\0",
+            "HW_2G_BW40_1S_TSSI_A=06 06 05 02 02\0HW_2G_BW40_1S_TSSI_B=F9 F9 F9 F8 F8\0",
+        );
+        let base = [0x68, 0x7d, 0x00, 0x5a, 0x19, 0xbe];
+        // 5G = wlan1 = base+2（实机日志 hwaddr=…19:C0 ifname=wlan1）
+        let w5 = flash_calibration_nv(nv, &RADIO1_5G, base).unwrap();
+        assert_eq!(&w5[..8], b"TYFC0003");
+        assert_eq!(w5[8], 0x60);
+        let mac5 = [0x68, 0x7d, 0x00, 0x5a, 0x19, 0xc0];
+        assert!(w5.windows(6).any(|w| w == mac5));
+        // 2G = wlan0 = base+1（实机日志 hwaddr=…19:BF ifname=wlan0）
+        let w2 = flash_calibration_nv(nv, &RADIO0_2G, base).unwrap();
+        let mac2 = [0x68, 0x7d, 0x00, 0x5a, 0x19, 0xbf];
+        assert!(w2.windows(6).any(|w| w == mac2));
+        // DIFF 缺失补 0 → 尾部 slope=0：最后 112 字节全 0
+        assert!(w5[w5.len() - 112..].iter().all(|&b| b == 0));
+        // 同结构等长
+        assert_eq!(w5.len(), w2.len());
     }
 
     #[test]

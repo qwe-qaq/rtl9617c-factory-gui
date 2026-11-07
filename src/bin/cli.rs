@@ -40,7 +40,31 @@ fn run(args: &[String]) -> Result<String, String> {
             let env = load_env(args)?;
             let device = read_file(&arg_value(args, "--device")?)?;
             let image = ubi::parse(&device)?;
-            let extracted = profile::profile(&model)?(&env, &image)?;
+            let mut extracted = profile::profile(&model)?(&env, &image)?;
+            // 可选：pt1570 mtd3 的 NV_CFG —— 原样存档（0x0103）并组装 Wi-Fi 校准
+            // （5G=wlan1=base+2、2G=wlan0=base+1，实机日志证据；DIFF 缺失补 0）
+            let mut nvcfg_blob: Option<Vec<u8>> = None;
+            if let Some(i) = args.iter().position(|a| a == "--wifi-nvcfg") {
+                let path = args.get(i + 1).ok_or("--wifi-nvcfg requires a file")?;
+                let data = read_file(path)?;
+                let blob = calib::normalize_nv_cfg(&data)?;
+                calib::validate_nv_cfg(&blob)?;
+                nvcfg_blob = Some(blob);
+            }
+            if model == "pt1570" {
+                if let Some(blob) = &nvcfg_blob {
+                    let text = String::from_utf8(blob.clone())
+                        .map_err(|_| "NV_CFG is not ASCII text".to_string())?;
+                    let base = extracted
+                        .identity
+                        .base_mac
+                        .ok_or("NV_CFG assembly requires BASE_MAC")?;
+                    extracted.wifi0 =
+                        Some(calib::flash_calibration_nv(&text, &calib::RADIO1_5G, base)?);
+                    extracted.wifi1 =
+                        Some(calib::flash_calibration_nv(&text, &calib::RADIO0_2G, base)?);
+                }
+            }
             let mut sections = profile::sections(&extracted)?;
             // 可选：光模块 A2h EEPROM 转储（env 机型 PON 校准不在 flash 分区里）
             if let Some(i) = args.iter().position(|a| a == "--pon-eeprom") {
@@ -49,13 +73,7 @@ fn run(args: &[String]) -> Result<String, String> {
                 calib::validate_a2h_dump(&data)?;
                 sections.push(layout::Section { tag: 0x0102, data });
             }
-            // 可选：pt1570 mtd3 的 NV_CFG 原样存档（Wi-Fi 校准字段，不组装）；
-            // 接受裸段或整个 mtd3 分区镜像（自动裁剪头部 NV_CFG）
-            if let Some(i) = args.iter().position(|a| a == "--wifi-nvcfg") {
-                let path = args.get(i + 1).ok_or("--wifi-nvcfg requires a file")?;
-                let data = read_file(path)?;
-                let blob = calib::normalize_nv_cfg(&data)?;
-                calib::validate_nv_cfg(&blob)?;
+            if let Some(blob) = nvcfg_blob {
                 sections.push(layout::Section { tag: 0x0103, data: blob });
             }
             let generation = std::time::SystemTime::now()
