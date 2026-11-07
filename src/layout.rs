@@ -312,7 +312,7 @@ mod tests {
             u32::from_le_bytes(image[TABLE_CRC_OFFSET..TABLE_CRC_OFFSET + 4].try_into().unwrap())
         );
         assert_eq!(image[0x1010..0x1016], [1, 2, 3, 4, 5, 6]);
-        assert_eq!(image[0x1020..0x1020 + 13], b"TYZDD0046AB9\0");
+        assert_eq!(&image[0x1020..0x1020 + 13], b"TYZDD0046AB9\0");
         // summarize_sections 与 summary 的段表一致（对完整镜像而言）
         let full = build(MODEL_TYFZA1, 0, &sections).unwrap();
         let from_summary = summary(&full).unwrap();
