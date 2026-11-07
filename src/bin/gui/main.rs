@@ -469,12 +469,15 @@ impl App {
     /// 处理拖入的文件：按文件名分类到 env / env2 / ubi_device 槽位。
     fn handle_drops(&mut self, ctx: &egui::Context) {
         // egui 0.36 起 dropped_files 是 `Arc<dyn DroppedFile>` trait 对象，
-        // 路径用 `path()` 方法读取（返回类型随平台为 &Path/&PathBuf，统一转拥有值）。
+        // `path()` 直接返回 `&Path`（无路径时为空）；过滤空路径后转拥有值。
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path().map(|p| p.to_path_buf()))
+                .filter_map(|f| {
+                    let p = f.path();
+                    (!p.as_os_str().is_empty()).then(|| p.to_path_buf())
+                })
                 .collect()
         });
         if dropped.is_empty() {
