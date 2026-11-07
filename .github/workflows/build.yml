@@ -1,0 +1,99 @@
+name: Build rtl9617c-factory
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Package
+        run: Compress-Archive -Path target/release/rtl9617c-factory.exe,target/release/rtl9617c-factory-gui.exe -DestinationPath rtl9617c-factory-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rtl9617c-factory-windows-x86_64
+          path: rtl9617c-factory-windows-x86_64.zip
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Package
+        run: tar -C target/release -czf rtl9617c-factory-macos-aarch64.tar.gz rtl9617c-factory rtl9617c-factory-gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rtl9617c-factory-macos-aarch64
+          path: rtl9617c-factory-macos-aarch64.tar.gz
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # glow dlopens libGL; rfd's Linux backend needs no GTK headers at build time.
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libx11-dev libxkbcommon-dev pkg-config
+      - name: Build
+        # eframe default-features=false leaves Linux with NO windowing backend;
+        # linux-x11 (eframe/x11) supplies it, same as h3c-factory CI.
+        run: cargo build --release --locked --features linux-x11
+      - name: Package
+        run: |
+          cp target/release/rtl9617c-factory target/release/rtl9617c-factory-gui .
+          tar -czf rtl9617c-factory-linux-x86_64.tar.gz rtl9617c-factory rtl9617c-factory-gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rtl9617c-factory-linux-x86_64
+          path: rtl9617c-factory-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs:
+      - windows
+      - macos
+      - linux
+    runs-on: ubuntu-24.04
+    # 任何触发类型都发布：手动 -> Latest，其余(push/PR) -> nightly
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show files
+        run: ls -lh dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && 'Latest' || 'nightly' }}
+          name: ${{ github.event_name == 'workflow_dispatch' && 'Latest' || 'nightly' }}
+          prerelease: ${{ github.event_name != 'workflow_dispatch' }}
+          make_latest: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            dist/**
