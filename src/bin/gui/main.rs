@@ -33,17 +33,22 @@ enum Model {
     /// 友华 PT1570-H10：env keyparam 机型（含整机 SN `kp_szSerialNumber`），
     /// 备份卷表中无 ubi_fpga 与校准文件，Wi-Fi/BOSA 段为空。
     Pt1570,
+    /// 友华 PT1570-R10：新一代固件（env 无 kp_*），数据回归 ubi_Config 卷的
+    /// config_hs.xml / config.xml（同 tyfza1），含完整 Wi-Fi 校准字段；
+    /// 无 BOSA/xtemp 文件、无 ubi_fpga 卷。
+    Pt1570R10,
 }
 
 impl Model {
-    fn all() -> [Model; 3] {
-        [Model::Tyfza1, Model::Pt1500H10, Model::Pt1570]
+    fn all() -> [Model; 4] {
+        [Model::Tyfza1, Model::Pt1500H10, Model::Pt1570, Model::Pt1570R10]
     }
     fn key(self) -> &'static str {
         match self {
             Model::Tyfza1 => "tyfza1",
             Model::Pt1500H10 => "pt1500-h10",
             Model::Pt1570 => "pt1570",
+            Model::Pt1570R10 => "pt1570-r10",
         }
     }
     fn label(self) -> &'static str {
@@ -51,6 +56,7 @@ impl Model {
             Model::Tyfza1 => "天邑 TYFZA1",
             Model::Pt1500H10 => "友华 PT1500-H10",
             Model::Pt1570 => "友华 PT1570-H10",
+            Model::Pt1570R10 => "友华 PT1570-R10",
         }
     }
     fn id(self) -> u32 {
@@ -58,6 +64,7 @@ impl Model {
             Model::Tyfza1 => layout::MODEL_TYFZA1,
             Model::Pt1500H10 => layout::MODEL_PT1500_H10,
             Model::Pt1570 => layout::MODEL_PT1570,
+            Model::Pt1570R10 => layout::MODEL_PT1570_R10,
         }
     }
     /// env 分区对本机型是否必需（tyfza1 的数据全部来自 ubi_device）。
@@ -363,6 +370,9 @@ impl App {
                 Model::Pt1570 => {
                     "pt1570：身份与 SN 来自 env 的 kp_* 产线变量；PON 校准在 EEPROM（不在分区），Wi-Fi 校准字段在 mtd3 NV_CFG"
                 }
+                Model::Pt1570R10 => {
+                    "pt1570-r10：身份与 Wi-Fi 校准都在 ubi_Config 卷（config_hs.xml），仅 mtd4 必需；PON 校准在 EEPROM"
+                }
             })
             .weak()
             .small(),
@@ -522,7 +532,8 @@ impl App {
         ui.add_space(6.0);
         ui.strong("身份信息（产线烧录数据）");
         let i = &ext.extracted.identity;
-        let is_tyfza1 = matches!(self.model, Model::Tyfza1);
+        // 有 Wi-Fi 校准的机型才展示派生 MAC（与校准块内嵌值同规则）。
+        let has_wifi_cal = matches!(self.model, Model::Tyfza1 | Model::Pt1570R10);
         egui::Grid::new("identity")
             .num_columns(2)
             .spacing([12.0, 5.0])
@@ -544,9 +555,8 @@ impl App {
                         .map_or("-".into(), |m| mac_to_string(m)),
                 );
                 ui.end_row();
-                // 派生 MAC：与 Wi-Fi 校准块内嵌值一致（5G=base+2，2.4G=base+1），
-                // 仅 tyfza1 有 Wi-Fi 校准，故只在该机型展示。
-                if is_tyfza1 {
+                // 派生 MAC：与 Wi-Fi 校准块内嵌值一致（5G=base+2，2.4G=base+1）。
+                if has_wifi_cal {
                     if let Some(base) = i.base_mac {
                         ui.weak("5G Wi-Fi MAC（base+2）");
                         ui.monospace(mac_to_string(&derived_mac(base, 2)));
@@ -561,8 +571,8 @@ impl App {
                 ui.end_row();
                 ui.weak("DEVICE_SN（整机 SN）");
                 ui.monospace(i.device_sn.clone().unwrap_or_else(|| {
-                    if is_tyfza1 {
-                        "-（tyfza1 无产线数据源）".into()
+                    if has_wifi_cal {
+                        "-（无产线数据源）".into()
                     } else {
                         "-".into()
                     }

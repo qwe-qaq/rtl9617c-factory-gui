@@ -1,7 +1,8 @@
 use crate::calib::{epon_llid_mac, flash_calibration, RADIO0_5G, RADIO1_2G};
 use crate::env::{parse_mac, EnvSet};
 use crate::layout::{
-    encode_string, Section, IMAGE_SIZE, MODEL_PT1500_H10, MODEL_PT1570, MODEL_TYFZA1,
+    encode_string, Section, IMAGE_SIZE, MODEL_PT1500_H10, MODEL_PT1570, MODEL_PT1570_R10,
+    MODEL_TYFZA1,
 };
 use crate::ubi::{Image as UbiImage, Volume};
 use crate::ubifs;
@@ -124,6 +125,21 @@ impl DeviceProfile for Pt1570 {
     }
 }
 
+/// 友华 PT1570-R10：新一代固件（booti + lzma 内核，env 无任何 `kp_*`），产线
+/// 数据回归 `config_hs.xml` / `config.xml`（ubi_Config 卷，UBIFS / LZO）。实测
+/// 字段集与 tyfza1 完全一致——含 TYFC0003 组装所需的全部 TSSI GAIN/CW DIFF
+/// 字段；无 `rtkbosa_k.bin` / `xtemp.cal`（PON 校准在光模块 EEPROM）、无
+/// `ubi_fpga` 卷；`EPON_LLID_TBL` 首条 macAddr = BASE_MAC（实测 8 条派生链）。
+/// 提取逻辑与 [`Tyfza1`] 完全相同；wlan0=5G=base+2 沿用天邑规则（推定，
+/// FEM_TYPE 组合 238/17 与 tyfza1 一致，待实机核对）。
+pub struct Pt1570R10;
+
+impl DeviceProfile for Pt1570R10 {
+    fn extract(env: &EnvSet, device: &UbiImage) -> Result<Extracted, String> {
+        Tyfza1::extract(env, device)
+    }
+}
+
 fn read_text(files: &ubifs::Files, name: &str) -> Result<String, String> {
     let data = files
         .get(name)
@@ -136,6 +152,7 @@ pub fn profile(name: &str) -> Result<fn(&EnvSet, &UbiImage) -> Result<Extracted,
         "tyfza1" => Ok(Tyfza1::extract),
         "pt1500-h10" => Ok(Pt1500H10::extract),
         "pt1570" => Ok(Pt1570::extract),
+        "pt1570-r10" => Ok(Pt1570R10::extract),
         other => Err(format!("unknown model: {other}")),
     }
 }
@@ -145,6 +162,7 @@ pub fn model_id(name: &str) -> Result<u32, String> {
         "tyfza1" => Ok(MODEL_TYFZA1),
         "pt1500-h10" => Ok(MODEL_PT1500_H10),
         "pt1570" => Ok(MODEL_PT1570),
+        "pt1570-r10" => Ok(MODEL_PT1570_R10),
         other => Err(format!("unknown model: {other}")),
     }
 }

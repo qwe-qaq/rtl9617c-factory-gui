@@ -13,6 +13,7 @@ Rust + egui 图形工具，用于**提取 / 生成 / 对照** RTL9617C 平台 GP
 | **tyfza1** | 天邑 TYFZA1（Wi-Fi + 下行光 + FPGA） | `ubi_Config` 卷内 XML/校准文件 + `ubi_fpga` 卷 | 有（flash 内，`rtkbosa_k.bin`） | 64 KiB，`RTLFACT1`（无 FPGA） |
 | **pt1500-h10** | 友华 PT1500-H10（无 Wi-Fi / 无下行光） | U-Boot env `kp_*` keyparam | **无**（在光模块 EEPROM） | 同上 |
 | **pt1570** | 友华 PT1570-H10（Wi-Fi 校准在 mtd3 NV_CFG，不足以组装 TYFC0003） | 同上（另有整机 SN `kp_szSerialNumber`） | **无**（在光模块 EEPROM） | 同上 |
+| **pt1570-r10** | 友华 PT1570-R10（新一代固件：env 无 `kp_*`，数据回归 ubi_Config 卷 XML） | `ubi_Config` 卷 `config_hs.xml`/`config.xml`（同 tyfza1，含完整 Wi-Fi 校准字段） | **无**（在光模块 EEPROM） | 同上 |
 
 > ⚠️ **重要声明**
 > - 本工具仅供 **研究 / 备份查看 / 自有设备维护** 使用，与 Realtek、Cortina 及任何设备厂商无关联，未包含任何厂商闭源代码。
@@ -66,6 +67,21 @@ PT1570 的 mtd4 卷表（两份副本逐记录一致）：`ubi_Config / ubi_DTB0
 ubi_r0/1 / ubi_framework1/2 / ubi_otherConfig / ubi_apps / ubi_BakConfig`，共 12 卷，
 **无 `ubi_fpga`**。`ubi_Config` 内只有 `psi`（TR-069 XML 运行时配置，155,275 B，
 LZO 压缩）、`scratchpad`、`newkey`/`newkey.cert`、`mnclt_*` 等，**无任何校准文件**。
+
+### pt1570-r10：换代固件，数据回归 config_hs.xml
+
+PT1570-R10（ProductClass `PT1570-R10-`，V3.04.15711U05）换了固件代际：`booti` +
+lzma 内核，**env 里没有任何 `kp_*`**，产线数据回归 tyfza1 式布局——`ubi_Config`
+卷（UBIFS / LZO）内含 `config_hs.xml`（37,377 B）/ `config.xml`（138,717 B）及
+`config_bak` 等 12 个文件。实测身份：MAC `1047e74d673c`、GPON_SN `YHTCE74D673C`、
+`EPON_LLID_TBL` 8 条派生链首条 = BASE_MAC。**TYFC0003 组装所需的全部字段（含 9 个
+TSSI GAIN/CW DIFF）都在**（config_hs.xml 共 339 个 `HW_*` 字段，thermal/xcap 到
+A–D 四路），故 R10 走 tyfza1 同款提取，Wi-Fi 校准可完整组装。
+
+> ⚠️ wlan 频段绑定为**推定**：`HW_WLAN0_FEM_TYPE=238` / `HW_WLAN1_FEM_TYPE=17`
+> 与 tyfza1 的 wlan0=5G 组合一致，故沿用 5G=base+2 / 2G=base+1。请在实机上用
+> `iw dev` 核对 wlan MAC，若不符反馈实际值即可调整。另 R10 无 `ubi_fpga` 卷、
+> 无 BOSA/xtemp 文件；备份多出的 `ubi_dpi` 卷（数据面配置）未纳入提取。
 
 ### ⚠️ env 机型的 PON 口校准在 EEPROM，不在分区里
 

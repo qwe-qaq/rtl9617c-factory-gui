@@ -4,7 +4,7 @@
 //! 内嵌 MAC 的定位。
 //!
 //! 用法：rtl9617c-factory-inspect <mtd1_env.bin> <mtd2_env2.bin> <mtd4_ubi_device.bin> [model]
-//! 其中 model 缺省为 tyfza1，可选 tyfza1 / pt1500-h10 / pt1570。
+//! 其中 model 缺省为 tyfza1，可选 tyfza1 / pt1500-h10 / pt1570 / pt1570-r10。
 use rtl9617c_factory::{calib, env, profile, ubi, ubifs, xml};
 use std::collections::BTreeMap;
 
@@ -154,16 +154,16 @@ fn main() {
     println!("  PON_SN    = {}", i.pon_sn.as_deref().unwrap_or("-"));
     if let Some(sn) = &i.device_sn {
         println!("  DEVICE_SN = {sn}");
-    } else if model == "tyfza1" {
-        println!("  DEVICE_SN = -（tyfza1 无产线数据源）");
+    } else if model == "tyfza1" || model == "pt1570-r10" {
+        println!("  DEVICE_SN = -（无产线数据源）");
     } else {
         println!("  DEVICE_SN = -");
     }
-    if model == "tyfza1" {
+    if model == "tyfza1" || model == "pt1570-r10" {
         let base = i.base_mac.expect("base mac");
         for (label, blob, off) in [
-            ("wifi0 (5G, rtl8852ce, TYFC0003)", &extracted.wifi0, 2u64),
-            ("wifi1 (2G, rtl8192xbe, TYFC0003)", &extracted.wifi1, 1u64),
+            ("wifi0 (5G, TYFC0003)", &extracted.wifi0, 2u64),
+            ("wifi1 (2G, TYFC0003)", &extracted.wifi1, 1u64),
         ] {
             match blob {
                 Some(d) => {
