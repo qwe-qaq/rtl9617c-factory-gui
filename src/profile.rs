@@ -148,8 +148,9 @@ fn read_text(files: &ubifs::Files, name: &str) -> Result<String, String> {
 }
 
 /// 机型表：本仓短名与上游 2026-11-13 之后的长机型名一一对应。
-/// 上游只定义了前两个机型；后两个是本仓扩展，别名按上游命名规则给出，
-/// `upstream_image_size` 按同类机型推导（env 机型 64 KiB、XML 机型 8 MiB）。
+/// 上游只定义了前两个机型；后两个是本仓扩展，别名按上游命名规则给出。
+/// `upstream_image_size` 按各机型的目标规格给定：tyfza1 为 8 MiB，
+/// pt1500-h10 / pt1570 / `youhua-pt1570-r10` 均为 64 KiB（R10 为用户确认规格）。
 pub struct ModelSpec {
     pub key: &'static str,
     pub upstream_name: &'static str,
@@ -189,7 +190,10 @@ pub const MODEL_SPECS: &[ModelSpec] = &[
         upstream_name: "youhua-pt1570-r10",
         model_id: MODEL_PT1570_R10,
         rtl1_image_size: IMAGE_SIZE,
-        upstream_image_size: 0x0080_0000,
+        // R10 的 raw 镜像为 64 KiB（用户确认的目标规格，非按 XML 机型推导的 8 MiB）。
+        // 该机型无 ubi_fpga 卷，FPGA_IMAGE(0x10000) 段不会进入段表，64 KiB 足够容纳
+        // 全部身份 + Wi-Fi 校准字段（最高到 0x6000）。
+        upstream_image_size: 0x0001_0000,
         extract: Pt1570R10::extract,
     },
 ];

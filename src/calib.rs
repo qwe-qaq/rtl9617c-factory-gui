@@ -170,33 +170,6 @@ pub fn epon_llid_mac(config_xml: &str) -> Option<String> {
     optional_field(chain, "macAddr").filter(|value| !value.is_empty())
 }
 
-/// PON_MODULE_EEPROM 段（tag 0x0102）的容量上限：256B A2h 基页 + 4 个私有页
-/// （Table 0x80 / 0x81 / T2 / T3，各 128B）。
-pub const A2H_DUMP_MAX: usize = 0x400;
-
-/// 校验 i2cdump 出的光模块 A2h 转储（SFF-8472 外部校准布局）：
-/// `0x5F = sum(0x00..0x5E) & 0xFF`（rtkbosa 原话：A2.5Fh = sum[A2.00h-0x5Eh]）。
-/// 不足 0x60 字节的部分转储跳过校验。
-pub fn validate_a2h_dump(data: &[u8]) -> Result<(), String> {
-    if data.len() > A2H_DUMP_MAX {
-        return Err(format!(
-            "PON EEPROM dump too large: {} > {} bytes",
-            data.len(),
-            A2H_DUMP_MAX
-        ));
-    }
-    if data.len() >= 0x60 {
-        let sum = data[..0x5F].iter().fold(0u8, |a, &b| a.wrapping_add(b));
-        if sum != data[0x5F] {
-            return Err(format!(
-                "A2h checksum mismatch: sum(0x00..0x5E)=0x{sum:02x}, stored CC_EXT=0x{:02x}",
-                data[0x5F]
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// WIFI_NV_CFG 段（tag 0x0103）的容量上限（PT1570 实测 598 字节，留余量）。
 pub const NV_CFG_MAX: usize = 0x400;
 
@@ -349,13 +322,4 @@ mod tests {
         assert!(normalize_nv_cfg(&vec![0u8; 100]).is_err());
     }
 
-    #[test]
-    fn a2h_dump_validation() {
-        let mut d = vec![0u8; 0x60];
-        d[0x5F] = d[..0x5F].iter().fold(0u8, |a, &b| a.wrapping_add(b));
-        assert!(validate_a2h_dump(&d).is_ok());
-        d[0x5F] = d[0x5F].wrapping_add(1);
-        assert!(validate_a2h_dump(&d).is_err());
-        assert!(validate_a2h_dump(&vec![0u8; 0x401]).is_err());
-    }
 }

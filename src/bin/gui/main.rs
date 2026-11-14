@@ -9,7 +9,7 @@
 //! 工作流（对应 CLI 的 `dump` / `build` 两个子命令）：
 //!   1. 选机型 → 选 U-Boot env（可选 env2）+ ubi_device 镜像（支持拖入窗口）
 //!   2. 后台线程提取身份数据与校准数据（= `dump`）
-//!   3. 「生成 factory.bin…」（= `build`），输出 8 MiB RTLFACT1 镜像并显示段表
+//!   3. 「生成上游格式 factory.bin…」（= `build`），默认输出 raw 镜像并显示段表
 //!
 //! Build: `cargo build --release`
 //! Run:   `cargo run --release --bin rtl9617c-factory-gui`
@@ -145,10 +145,14 @@ struct Extraction {
     extracted: profile::Extracted,
 }
 
-/// 「生成 factory.bin」的结果：段表 + 保存路径。
+/// 「生成 factory.bin」的结果：段表 + 保存路径 + 被跳过的存档段。
 struct BuildOut {
     entries: Vec<layout::SummaryEntry>,
     saved_to: Option<PathBuf>,
+    /// raw 模式下未写入镜像的本仓原样存档段（明确展示，不静默丢弃）。
+    skipped: Vec<String>,
+    /// 生成模式描述，用于结果区标题。
+    kind: &'static str,
 }
 
 /// 生成模式：本仓 RTLFACT1 完整 / 本仓 RTLFACT1 紧凑 / 上游固定偏移。
@@ -161,16 +165,14 @@ enum BuildMode {
 
 struct App {
     model: Model,
-    /// 输出格式，默认本仓增强的 RTLFACT1；可切换到上游 11-13 之后的 raw 格式。
+    /// 输出格式，默认上游 11-13 之后的 raw（固定偏移）；可切换到本仓 RTLFACT1。
     format: layout::OutputFormat,
     env_path: Option<PathBuf>,
     env2_path: Option<PathBuf>,
     device_path: Option<PathBuf>,
-    /// 用户提供的光模块 A2h EEPROM 转储（factory.bin tag 0x0102，可选）。
-    /// env 机型的 PON 口校准在光模块内，只能从原厂固件 i2cdump 获得。
-    pon_eeprom: Option<Vec<u8>>,
     /// 用户提供的 mtd3 NV_CFG 转储（factory.bin tag 0x0103，可选）。
-    /// pt1570 的 Wi-Fi 校准字段在其中，因缺 DIFF 字段不组装、原样存档。
+    /// pt1570 用它组装 Wi-Fi 校准段(0x0100/0x0101)；RTLFACT1 下另存原档，
+    /// raw 模式下原档不写入，但组装出的校准段照常写入。
     wifi_nvcfg: Option<Vec<u8>>,
     /// 提取结果（None = 尚未提取）。
     result: Option<Result<Extraction, String>>,
@@ -185,11 +187,10 @@ impl App {
     fn new() -> App {
         App {
             model: Model::Tyfza1,
-            format: layout::OutputFormat::RtlFact1,
+            format: layout::OutputFormat::default(),
             env_path: None,
             env2_path: None,
             device_path: None,
-            pon_eeprom: None,
             wifi_nvcfg: None,
             result: None,
             build_out: None,
@@ -287,25 +288,23 @@ impl App {
         };
         let res = (|| -> Result<BuildOut, String> {
             let mut sections = profile::sections(&ext.extracted)?;
-            // 本仓新增段（EEPROM / NV_CFG）只有 RTLFACT1 的目录表能容纳；
-            // raw 格式字段表固定，必须显式报错而不是静默丢弃数据。
-            if mode == BuildMode::UpstreamRaw
-                && (self.pon_eeprom.is_some() || self.wifi_nvcfg.is_some())
-            {
-                return Err("上游 raw 格式的字段表是固定的 10 个字段，无法容纳 PON_MODULE_EEPROM / WIFI_NV_CFG；请切换回「RTLFACT1」格式".into());
-            }
-            if let Some(data) = &self.pon_eeprom {
-                sections.push(layout::Section {
-                    tag: 0x0102,
-                    data: data.clone(),
-                });
-            }
+            // 原样存档段：RTLFACT1 有目录表可容纳，raw 的固定字段表没有位置。
             if let Some(data) = &self.wifi_nvcfg {
                 sections.push(layout::Section {
                     tag: 0x0103,
                     data: data.clone(),
                 });
             }
+            // NV_CFG 组装出的 Wi-Fi 校准段(0x0100/0x0101)属于上游固定字段表，
+            // 在 profile::sections() 里已生成，必须照常写入。raw 模式只跳过
+            // 0x0103 这一个「原档」，并把跳过内容明确展示，绝不静默丢数据。
+            let skipped = if mode == BuildMode::UpstreamRaw {
+                let (kept, skipped) = layout::filter_raw_sections(&sections);
+                sections = kept;
+                skipped
+            } else {
+                Vec::new()
+            };
             let generation = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -347,16 +346,27 @@ impl App {
             if let Some(target) = &saved_to {
                 std::fs::write(target, &bin).map_err(|e| format!("写入失败: {e}"))?;
             }
-            Ok(BuildOut { entries, saved_to })
+            Ok(BuildOut { entries, saved_to, skipped, kind })
         })();
         let format_name = self.format.as_str();
         self.build_out = Some(match res {
             Ok(out) => {
+                let skip_note = if out.skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "；已跳过 {} 个原档存档段（NV_CFG 等原档不写入，其组装的 Wi‑Fi 校准段已写入）",
+                        out.skipped.len()
+                    )
+                };
                 self.status = match &out.saved_to {
-                    Some(p) => format!("已生成 {}（{}） -> {}", kind, format_name, p.display()),
+                    Some(p) => format!(
+                        "已生成 {}（{}）{} -> {}",
+                        kind, format_name, skip_note, p.display()
+                    ),
                     None => format!(
-                        "已生成 {}（{}，未保存，重新点生成可保存）",
-                        kind, format_name
+                        "已生成 {}（{}，未保存，重新点生成可保存）{}",
+                        kind, format_name, skip_note
                     ),
                 };
                 Ok(out)
@@ -392,7 +402,7 @@ impl App {
                     self.start_extract(&ctx);
                 }
             }
-            // 输出格式：本仓增强的 RTLFACT1（默认） / 上游 11-13 之后的固定偏移。
+            // 输出格式：上游 11-13 之后的固定偏移（默认） / 本仓增强的 RTLFACT1。
             let prev_format = self.format;
             egui::ComboBox::from_id_salt("format_select")
                 .width(165.0)
@@ -413,9 +423,9 @@ impl App {
                 self.build_out = None;
                 self.status = match self.format {
                     layout::OutputFormat::RtlFact1 =>
-                        "已切换输出格式：RTLFACT1（含头/目录/CRC，支持紧凑镜像与新增字段）".to_string(),
+                        "已切换输出格式：RTLFACT1（含头/目录/CRC，支持紧凑镜像与原档存档段）".to_string(),
                     layout::OutputFormat::UpstreamRaw =>
-                        "已切换输出格式：上游 raw（固定偏移、无校验，镜像大小按机型；EEPROM / NV_CFG 段不可用）".to_string(),
+                        "已切换输出格式：上游 raw（固定偏移、无校验，镜像大小按机型；NV_CFG 原档不写入，但由其组装的 Wi‑Fi 校准段照常写入）".to_string(),
                 };
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -505,67 +515,6 @@ impl App {
             let ctx = ui.ctx().clone();
             self.start_extract(&ctx);
         }
-    }
-
-    /// 光模块 A2h EEPROM 转储行（用户自行从原厂固件 dump，可选载入）。
-    fn ui_pon_eeprom(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(2.0);
-        ui.group(|ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.strong("PON 模块 EEPROM (A2h)");
-                ui.weak("env 机型 PON 口校准所在 · 原厂固件 i2cdump 0x51 · 校验 0x5F");
-                match &self.pon_eeprom {
-                    Some(d) => ui.add(
-                        egui::Label::new(egui::RichText::new(format!("已载入 {} 字节", d.len())).weak())
-                            .truncate(),
-                    ),
-                    None => ui.weak("未提供"),
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.pon_eeprom.is_some() && ui.button("清除").clicked() {
-                        self.pon_eeprom = None;
-                        self.status = "已清除 PON EEPROM 转储".into();
-                    }
-                    if let Some(d) = &self.pon_eeprom {
-                        if ui.button("导出…").clicked() {
-                            if let Some(p) = FileDialog::new()
-                                .set_file_name("pon-a2h-dump.bin")
-                                .save_file()
-                            {
-                                match std::fs::write(&p, d.as_slice()) {
-                                    Ok(_) => {
-                                        self.status =
-                                            format!("已导出 {} 字节 -> {}", d.len(), p.display())
-                                    }
-                                    Err(e) => self.status = format!("导出失败: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    if ui.button("导入…").clicked() {
-                        if let Some(p) = FileDialog::new()
-                            .add_filter("EEPROM 转储", &["bin", "dump"])
-                            .pick_file()
-                        {
-                            match std::fs::read(&p) {
-                                Ok(data) => match calib::validate_a2h_dump(&data) {
-                                    Ok(()) => {
-                                        self.status = format!(
-                                            "已导入 PON EEPROM 转储: {} 字节（校验和通过）",
-                                            data.len()
-                                        );
-                                        self.pon_eeprom = Some(data);
-                                    }
-                                    Err(e) => self.status = format!("导入被拒: {e}"),
-                                },
-                                Err(e) => self.status = format!("读取失败: {e}"),
-                            }
-                        }
-                    }
-                });
-            });
-        });
     }
 
     /// mtd3 NV_CFG 转储行（pt1570 的 Wi-Fi 校准字段，原样存档，可选）。
@@ -799,7 +748,11 @@ impl App {
             return;
         };
         ui.add_space(6.0);
-        ui.strong("生成结果（8 MiB RTLFACT1）");
+        let title = match out {
+            Ok(b) => format!("生成结果（{}）", b.kind),
+            Err(_) => "生成结果".to_string(),
+        };
+        ui.strong(title);
         match out {
             Ok(b) => {
                 if let Some(p) = &b.saved_to {
@@ -822,6 +775,20 @@ impl App {
                             ui.end_row();
                         }
                     });
+                if !b.skipped.is_empty() {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(150, 100, 20),
+                        format!(
+                            "以下 {} 个原档存档段未写入（上游固定字段表无对应位置）：",
+                            b.skipped.len()
+                        ),
+                    );
+                    ui.weak("由 NV_CFG 组装出的 WIFI_CAL_RADIO0 / RADIO1 已正常写入镜像。");
+                    for s in &b.skipped {
+                        ui.monospace(format!("  · {s}"));
+                    }
+                }
             }
             Err(e) => {
                 ui.colored_label(egui::Color32::from_rgb(170, 40, 40), e);
@@ -882,18 +849,6 @@ impl App {
                             self.wifi_nvcfg = Some(blob);
                         }
                         Err(e) => self.status = format!("拖拽被拒（NV_CFG 校验失败）: {e}"),
-                    },
-                    Err(e) => self.status = format!("读取失败: {e}"),
-                }
-            } else if name.contains("a2h") || name.contains("eeprom") {
-                // 光模块 A2h 转储：PON EEPROM 存档槽
-                match std::fs::read(&path) {
-                    Ok(data) => match calib::validate_a2h_dump(&data) {
-                        Ok(()) => {
-                            self.pon_eeprom = Some(data);
-                            self.status = "已导入 PON EEPROM 转储（拖拽）· 校验和通过".into();
-                        }
-                        Err(e) => self.status = format!("拖拽被拒（A2h 校验失败）: {e}"),
                     },
                     Err(e) => self.status = format!("读取失败: {e}"),
                 }
@@ -1070,7 +1025,6 @@ impl eframe::App for App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.ui_sources(ui);
-                self.ui_pon_eeprom(ui);
                 self.ui_wifi_nvcfg(ui);
                 self.ui_identity(ui);
                 self.ui_sections(ui);

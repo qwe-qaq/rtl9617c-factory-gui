@@ -42,18 +42,15 @@ fn run(args: &[String]) -> Result<String, String> {
                 Some(i) => layout::OutputFormat::parse(
                     args.get(i + 1).ok_or("--format requires <rtl1|raw>")?,
                 )?,
-                None => layout::OutputFormat::RtlFact1,
+                // 默认导出上游 raw 格式（与 OutputFormat::default() 保持一致）。
+                None => layout::OutputFormat::default(),
             };
             let compact = args.iter().any(|a| a == "--compact");
-            // raw 格式严格对齐上游：固定 10 个字段、镜像大小由机型决定，
-            // 不支持紧凑镜像，也无法容纳本仓新增的 EEPROM / NV_CFG 段。
-            if format == layout::OutputFormat::UpstreamRaw {
-                if compact {
-                    return Err("--compact 仅适用于 --format rtl1；raw 格式的镜像大小由机型决定".into());
-                }
-                if args.iter().any(|a| a == "--pon-eeprom" || a == "--wifi-nvcfg") {
-                    return Err("raw 格式的字段表是上游固定的 10 个字段，无法容纳 PON_MODULE_EEPROM / WIFI_NV_CFG；请改用 --format rtl1".into());
-                }
+            // raw 格式严格对齐上游：固定 10 个字段、镜像大小由机型决定，不支持
+            // 紧凑镜像。--wifi-nvcfg 仍可传入：NV_CFG 用于组装
+            // Wi-Fi 校准段(0x0100/0x0101，属于上游字段表)，只是原档不写入镜像。
+            if format == layout::OutputFormat::UpstreamRaw && compact {
+                return Err("--compact 仅适用于 --format rtl1；raw 格式的镜像大小由机型决定".into());
             }
             let env = load_env(args)?;
             let device = read_file(&arg_value(args, "--device")?)?;
@@ -84,16 +81,18 @@ fn run(args: &[String]) -> Result<String, String> {
                 }
             }
             let mut sections = profile::sections(&extracted)?;
-            // 可选：光模块 A2h EEPROM 转储（env 机型 PON 校准不在 flash 分区里）
-            if let Some(i) = args.iter().position(|a| a == "--pon-eeprom") {
-                let path = args.get(i + 1).ok_or("--pon-eeprom requires a file")?;
-                let data = read_file(path)?;
-                calib::validate_a2h_dump(&data)?;
-                sections.push(layout::Section { tag: 0x0102, data });
-            }
             if let Some(blob) = nvcfg_blob {
                 sections.push(layout::Section { tag: 0x0103, data: blob });
             }
+            // raw 模式只剔除「原样存档」段（0x0103）。NV_CFG 组装出的
+            // Wi-Fi 校准段(0x0100/0x0101)是上游固定字段，必须保留并写入镜像。
+            let skipped_sections = if format == layout::OutputFormat::UpstreamRaw {
+                let (kept, skipped) = layout::filter_raw_sections(&sections);
+                sections = kept;
+                skipped
+            } else {
+                Vec::new()
+            };
             let generation = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -135,6 +134,15 @@ fn run(args: &[String]) -> Result<String, String> {
                     "  0x{:06x}  {:<22} size={:<8} crc=0x{:08x}\n",
                     entry.offset, entry.name, entry.size, entry.crc
                 ));
+            }
+            if !skipped_sections.is_empty() {
+                report.push_str(
+                    "note: archive-only sections dropped (upstream layout has no slot; \
+                     NV_CFG-derived Wi-Fi calibration was written as usual):\n",
+                );
+                for s in &skipped_sections {
+                    report.push_str(&format!("  - {s}\n"));
+                }
             }
             Ok(report)
         }
@@ -187,7 +195,7 @@ fn run(args: &[String]) -> Result<String, String> {
             report.push_str(&format!("sections: {}\n", sections.len()));
             Ok(report)
         }
-        _ => Err("usage: rtl9617c-factory <build|dump> --model <tyfza1|pt1500-h10|pt1570|pt1570-r10|tianyi-tyfza1-2p5g|youhua-pt1500-h10-ct-2p5g> --env <file> [--env2 <file>] --device <file> [-o <out.bin>] [--format <rtl1|raw>] [--compact] [--pon-eeprom <file>] [--wifi-nvcfg <file>]".into()),
+        _ => Err("usage: rtl9617c-factory <build|dump> --model <tyfza1|pt1500-h10|pt1570|pt1570-r10|tianyi-tyfza1-2p5g|youhua-pt1500-h10-ct-2p5g|youhua-pt1570-h10|youhua-pt1570-r10> --env <file> [--env2 <file>] --device <file> [-o <out.bin>] [--format <rtl1|raw>] [--compact] [--wifi-nvcfg <file>] (default: raw)".into()),
     }
 }
 

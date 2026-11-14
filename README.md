@@ -6,9 +6,10 @@ Rust + egui 图形工具，用于**提取 / 生成 / 对照** RTL9617C 平台 GP
 界面模式参考同系列 [`h3c-factory`](https://github.com/lyq1996/h3c-factory)
 （fiberhome-factory 系）。
 
-> **2026-11-14 上游同步**：本仓现支持两种输出格式。默认仍是本仓增强的
-> `RTLFACT1`（带头部 / 目录 / CRC）；新增 `--format raw`（GUI 顶栏可切换）对应上游
-> 2026-11-13 重构后的纯固定偏移格式，产物与上游当前版逐字节一致。
+> **2026-11-14 上游同步**：本仓现支持两种输出格式，**默认导出 `raw`**——即上游
+> 2026-11-13 重构后的纯固定偏移格式，产物与上游当前版逐字节一致、大小按机型
+> （`youhua-pt1570-r10` 等为 64 KiB）。需要带头部 / 目录 / CRC 的 `RTLFACT1`、
+> 紧凑镜像或 NV_CFG 原档存档时，显式用 `--format rtl1`（GUI 顶栏可切换）。
 > 详见下文「与上游同步」章节。
 
 支持机型（`--model` / 界面切换）：
@@ -20,9 +21,14 @@ Rust + egui 图形工具，用于**提取 / 生成 / 对照** RTL9617C 平台 GP
 | **pt1570** | 友华 PT1570-H10（Wi-Fi 校准在 mtd3 NV_CFG，DIFF 缺失按产线惯例补 0 组装） | 同上（另有整机 SN `kp_szSerialNumber`） | **无**（在光模块 EEPROM） | 同上 |
 | **pt1570-r10** | 友华 PT1570-R10（新一代固件：env 无 `kp_*`，数据回归 ubi_Config 卷 XML） | `ubi_Config` 卷 `config_hs.xml`/`config.xml`（同 tyfza1，含完整 Wi-Fi 校准字段） | **无**（在光模块 EEPROM） | 同上 |
 
+> 各机型的**默认 `raw` 镜像大小**：`tyfza1` = 8 MiB；`pt1500-h10` / `pt1570` /
+> `pt1570-r10`（上游名 `youhua-pt1570-r10`）= **64 KiB**。R10 的 64 KiB 是目标设备
+> 确认规格，不是按同类机型推导的推测值；该机型无 `ubi_fpga` 卷，全部身份与 Wi-Fi
+> 校准字段都在 `0x6000` 之前，64 KiB 足够容纳。
+
 > ⚠️ **重要声明**
 > - 本工具仅供 **研究 / 备份查看 / 自有设备维护** 使用，与 Realtek、Cortina 及任何设备厂商无关联，未包含任何厂商闭源代码。
-> - 生成的 factory.bin 由 U-Boot 经 `ubiupdatevol` / `ubi write` 写入 UBI static 卷 `factory`；紧凑镜像（64 KiB）**不可直接刷写**。
+> - 生成的 factory.bin 由 U-Boot 经 `ubiupdatevol` / `ubi write` 写入 UBI static 卷 `factory`；**`RTLFACT1` 的 64 KiB 紧凑镜像不可直接刷写**，而默认 `raw` 的 64 KiB 是这些机型的正式镜像。
 > - 修改设备出厂数据可能导致设备无法启动或违反当地法规，请仅在自己拥有的设备上操作。
 
 ## 输入文件
@@ -96,7 +102,8 @@ A–D 四路），故 R10 走 tyfza1 同款提取，Wi-Fi 校准可完整组装�
 
 - 备份里**没有**是正常现象，factory.bin 也**无需**包含它；
 - 刷写 factory.bin 不触碰 EEPROM，校准天然安全；
-- 要存档/迁移校准 → 在**原厂固件**上 I2C dump（见下文「PON 模块 EEPROM 存档」）。
+- 如需单独留存，可在**原厂固件**上 I2C dump；但**本工具不再把它写入 factory.bin**
+  ——备份里本就没有这段数据，`PON_MODULE_EEPROM`（tag `0x0102`）槽位已移除。
 
 ## factory.bin 规范（RTLFACT1）
 
@@ -142,13 +149,12 @@ A–D 四路），故 R10 走 tyfza1 同款提取，Wi-Fi 校准可完整组装�
 | `0x4000` | `0x800` | `0x0110` | BOSA_CALIBRATION | `rtkbosa_k.bin`（1024 B） | 空（在 EEPROM） |
 | `0x4800` | `0x400` | `0x0111` | BOSA_OLT_CALIBRATION | `rtkoltbosa_k.bin`（588 B） | 空（在 EEPROM） |
 | `0x5000` | `0x1000` | `0x0112` | XTEMP_CALIBRATION | `xtemp.cal`（JSON） | 空 |
-| `0x6000` | `0x400` | `0x0102` | **PON_MODULE_EEPROM**（本仓新增） | 可选（见 EEPROM 章节） | 可选 |
 | `0x7000` | `0x400` | `0x0103` | **WIFI_NV_CFG**（本仓新增） | — | 可选（pt1570 mtd3 NV_CFG 原样存档） |
 | `0x10000` | `0x7E0000` | `0x0200` | FPGA_IMAGE | `ubi_fpga` 卷原始内容 | 空 |
 
-`0x001040`–`0x001FFF`、`0x007000`–`0x00FFFF` 为预留空隙；新硬件字段优先使用
-tag `0x0012`–`0x00FF`（身份区）与 `0x0102`–`0x010F` / `0x0113`–`0x011F`（校准区），
-并复用预留空隙的偏移——`0x0102` 即按此规则落在 `0x6000`。
+`0x001040`–`0x001FFF`、`0x008000`–`0x00FFFF` 为预留空隙；新硬件字段优先使用
+tag `0x0012`–`0x00FF`（身份区）与 `0x0104`–`0x010F` / `0x0113`–`0x011F`（校准区），
+并复用预留空隙的偏移。原 `0x0102` / `0x6000`（PON_MODULE_EEPROM）槽位已移除，保持留空。
 
 ### CRC 规则
 
@@ -167,8 +173,9 @@ tag `0x0012`–`0x00FF`（身份区）与 `0x0102`–`0x010F` / `0x0113`–`0x01
 
 - 布局、目录、CRC 链与完整镜像**完全同规则**，仅 `image_size = 0x00010000`、无
   `FPGA_IMAGE` 段（传入的 `0x0200` 段被忽略，单测锁定）；
-- 用途：小体积留存 MAC / SN / Wi-Fi / BOSA / xtemp / PON EEPROM；
-- ⚠️ **不可直接刷写**：恢复设备用完整 8 MiB 镜像整体写入 `factory` 卷。
+- 用途：小体积留存 MAC / SN / Wi-Fi / BOSA / xtemp；
+- ⚠️ **不可直接刷写**：恢复设备用完整 8 MiB 镜像整体写入 `factory` 卷；且该模式
+  仅在 `--format rtl1` 下可用，默认 `raw` 下传 `--compact` 会明确报错。
 
 ## Wi-Fi 校准组装（TYFC0003，tyfza1）
 
@@ -194,100 +201,123 @@ Wi-Fi 校准段是原厂 `factory.uc` 组装格式的逐字节移植，字段全
 > 头部 NV_CFG、去除尾部 0x00 填充），校验魔数 `72 D6 EF 41` + `/** NV_CFG **/`
 > 标记。
 >
+> **原档是否写入取决于输出格式**：`RTLFACT1` 下原档写入 `0x0103`；默认 `raw` 下
+> 原档**不写入**（上游固定字段表无槽位），但由它组装的 `WIFI_CAL_RADIO0/1`
+> 照常写入镜像。
+>
 > **wlan 频段绑定（实机日志证据）**：PT1570-H10 的 mtd4 运行日志
 > `hwaddr=68:7D:00:5A:19:C0 ifname=wlan1`（=base+2）、
 > `hwaddr=68:7D:00:5A:19:BF ifname=wlan0`（=base+1）→ **wlan1=5G、wlan0=2G**
 > （与 tyfza1 相反）。2G 芯片同为 `rtl8192xbe`。
 
-## PON 模块 EEPROM（A2h）存档（tag 0x0102，本仓新增）
+## 关于光模块 EEPROM（不写入 factory.bin）
 
-env 机型的 PON 口校准在光模块内部。硬件事实（PT1500 DTB + 启动日志）：
+env 机型的 PON 口校准在光模块 A2h EEPROM（SFF-8472，I2C 从机 `0x51`），
+**不在任何 flash 分区**；整盘备份扫描无 `bosa` / `rtkbosa` / `xtemp` / `calib`。
+因此备份里没有这段数据，factory.bin 也不需要它——原先的
+`PON_MODULE_EEPROM`（tag `0x0102` / 偏移 `0x6000`）槽位及其导入、A2h 校验、
+`--pon-eeprom` 参数与 GUI 行**已全部移除**，该偏移保持留空。
 
-| 项 | 值 |
-|---|---|
-| I2C 控制器 | `cortina,ca77xx-i2c`，`0xf4329160`（0x28 字节），100 kHz，GPIO_204/205 |
-| 总线 | `/dev/i2c-0`（原厂内核已开 i2c-dev） |
-| A0h（Base ID） | 7 位地址 `0x50` |
-| **A2h（DDMI + 校准）** | **7 位地址 `0x51`**（启动日志 `A2 use devID:0x51`） |
-| 基页 | A2h `0x00`–`0x7F`；页选择字节在 `0x7F`，切页后读 `0x80`–`0xFF` |
-| 校验 | `0x5F = sum(0x00..0x5E) & 0xFF`（rtkbosa 原话） |
-| 关键系数 | `0x38-0x3B` Rx_PWR 四系数、`0x3C-0x4B` Tx_I/Tx_PWR/T/V 斜率偏移（S16 大端） |
-| 厂商私有 | 基页 `0xB1/0xB6/0xBB/…`；Table 0x80：`0xD5`=APD_OFFSET、`0xE1/E2`=APD_RAMP_TGT、`0xE8/E9`=APD_OFFSET-ADC；Table 0x81：`0xB6`=APD LUT enable；T2/T3 各多处 |
-
-dump 方法（**在原厂固件上做**，它自带 i2c-dev）：
-
-```sh
-i2cdump -y -f 0 0x51                                   # A2h 基页 256B
-i2cset -y -f 0 0x51 0x7F 0x80 && i2cdump -y -f 0 0x51  # 私有页 0x80
-i2cset -y -f 0 0x51 0x7F 0x81 && i2cdump -y -f 0 0x51  # 私有页 0x81
-i2cset -y -f 0 0x51 0x7F 0x02 && i2cdump -y -f 0 0x51  # T2
-i2cset -y -f 0 0x51 0x7F 0x03 && i2cdump -y -f 0 0x51  # T3（0xDB 为表内校验）
-i2cset -y -f 0 0x51 0x7F 0x00                          # 回基页
-# 也可用原厂 diag：diag i2c … / laser param --dump current / laser dumpdata --show
-```
-
-工具把转储作为 `PON_MODULE_EEPROM`（tag `0x0102`，偏移 `0x6000`，容量 `0x400`）
-写入完整 / 紧凑镜像，存储布局：`0x000-0x0FF` 基页、`0x100`/`0x180`/`0x200`/`0x280`
-起依次为页 `0x80` / `0x81` / T2 / T3（各 128 B，可选）。载入时自动校验 CC_EXT
-（≥0x60 字节时），不对则拒绝并给出计算值与存储值。GUI 在「PON 模块 EEPROM (A2h)」
-行**载入…**；CLI 用 `--pon-eeprom <dump.bin>`。
-
-> ⚠️ **读得到 ≠ 用得上**：第三方系统要让 PON 上线还需整套闭源驱动栈
-> （`ca-ne.ko` / `ca-rtk.ko` / `cli-drv.ko` / `libscfg.ko` + `ca-plat-kernel.ko`，
-> vermagic 绑死 `5.10.70 SMP aarch64`）。本功能定位是**存档与迁移**。先 dump 再
-> 刷机；刷机过程**不要 `mtd erase ubi_device`**（会连设备身份文件一起丢）。
+> 若确实需要单独留存光模块校准，请在**原厂固件**上用 `i2cdump -y -f 0 0x51`
+> 自行 dump；本工具只负责 factory.bin，不再承载 EEPROM 转储。
+> 第三方系统要让 PON 上线仍需整套闭源驱动栈，读得到 ≠ 用得上。
 
 ## 与上游同步（2026-11-14）
 
 上游 `lyq1996/rtl9617c-factory` 在 2026-11-13 提交 `7a2455c`
 （`layout: output fields at fixed offsets`）把镜像格式改成了**无 magic / 无头部 /
 无目录 / 无 CRC 的纯固定偏移布局**，机型也改成了长名。本仓原本基于上游 10-28 的
-初版，两者产物互不兼容。本次同步把上游的新格式做成**第二种可选输出格式**，
-不替换原有的 `RTLFACT1`，因此 GUI 的全部增强功能都保留。
+初版，两者产物互不兼容。本次同步把上游的新格式做成**第二种可选输出格式**并设为
+**默认**，不替换原有的 `RTLFACT1`，因此 GUI 的全部增强功能都保留。
 
 ### 两种格式
 
-| | `RTLFACT1`（默认，`--format rtl1`） | `raw`（`--format raw`） |
+| | `RTLFACT1`（`--format rtl1`） | `raw`（**默认**，`--format raw`） |
 |---|---|---|
 | 镜像头 | `RTLFACT1` magic + version / size / model id / generation | 无（前 `0x1000` 字节全 `0xFF`） |
 | 目录 | `0x200`–`0x400`，32 条 × 16 B（tag / offset / size / CRC） | 无（该区域全 `0xFF`） |
 | 校验 | `image_crc` / `table_crc` / `header_crc` 三重 CRC32 | 无 |
-| 字段索引 | tag（可容纳本仓新增 `0x0102` / `0x0103`） | 固定 10 个字段，按 name + 固定偏移 |
-| 镜像大小 | 统一 8 MiB；`--compact` 另有 64 KiB 存档镜像 | 按机型：8 MiB / 64 KiB（**64 KiB 可直接刷写**） |
+| 字段索引 | tag（可容纳本仓新增 `0x0103`） | 固定 10 个字段，按 name + 固定偏移 |
+| 镜像大小 | 统一 8 MiB；`--compact` 另有 64 KiB 存档镜像 | 按机型：`tyfza1` 8 MiB，其余 64 KiB（**64 KiB 可直接刷写**） |
 | 反解析 | `summary()` 校验 magic 与 CRC | 无校验，`dump` 只打印提取字段 |
 | 与上游当前版 | 不兼容 | **逐字节一致**（已验证） |
 
-> ⚠️ `64 KiB` 在两种格式里语义相反：本仓 `RTLFACT1` 的 64 KiB 是**存档用**紧凑镜像，
-> 不可刷写；上游 `raw` 的 64 KiB 是 PT1500-H10 的**正式可刷写**镜像。
+> ⚠️ `64 KiB` 在两种格式里语义相反：`RTLFACT1` 的 64 KiB 是**存档用**紧凑镜像，
+> 不可刷写；默认 `raw` 的 64 KiB 是 PT1500-H10 / PT1570 / `youhua-pt1570-r10`
+> 的**正式可刷写**镜像。
+
+### 默认输出格式与 R10 规格（r4）
+
+用户确认的目标规格，已锁定为 `OutputFormat::default()` 与 `MODEL_SPECS`：
+
+| 项 | 值 |
+|---|---|
+| 默认导出格式 | `raw`（上游固定偏移，无头/目录/CRC） |
+| `youhua-pt1570-r10` → 本仓短名 | `pt1570-r10`（别名本已存在） |
+| `youhua-pt1570-r10` 的 raw 镜像大小 | **64 KiB**（`0x0001_0000`，原为按 XML 机型推导的 8 MiB） |
+
+CLI 不带 `--format`、GUI 打开时均默认 `raw`；`RTLFACT1` 仍完整保留，显式
+`--format rtl1` 或顶栏切换即可。回归用例见 `tests/default_raw.rs`。
 
 ### 同步了什么
 
 - `src/layout.rs`：新增 `OutputFormat`、`RAW_FIELDS`（与上游 `FIELDS` 逐项一致）、
-  `upstream_name()` tag 映射、`build_raw()`、`summarize_raw()`；原有 `build()` /
-  `build_compact()` / `summary()` 逻辑未改。
+  `upstream_name()` tag 映射、`build_raw()`、`summarize_raw()`；r4 给 `OutputFormat`
+  加 `Default`（`UpstreamRaw`）。原有 `build()` / `build_compact()` / `summary()` 逻辑未改。
 - `src/profile.rs`：新增 `MODEL_SPECS` 机型表，注册上游长机型名
-  `tianyi-tyfza1-2p5g` / `youhua-pt1500-h10-ct-2p5g` 作为别名，并按机型给出
-  `upstream_image_size`；本仓 4 个短机型与 model id 全部保留。
-- `src/bin/cli.rs`：新增 `--format <rtl1|raw>`，`dump` 同样接受长机型名。
-- `src/bin/gui/main.rs`：顶栏新增「输出格式」下拉框；`raw` 模式下生成按钮改为
-  「生成上游格式 factory.bin…」。
+  `tianyi-tyfza1-2p5g` / `youhua-pt1500-h10-ct-2p5g` / `youhua-pt1570-r10` 作为别名，
+  并按机型给出 `upstream_image_size`（r4 把 R10 定为 64 KiB）；本仓 4 个短机型与
+  model id 全部保留。
+- `src/bin/cli.rs`：新增 `--format <rtl1|raw>`，r4 缺省值改为 `default()`；`dump` 同样
+  接受长机型名。
+- `src/bin/gui/main.rs`：顶栏新增「输出格式」下拉框，r4 初始格式改为 `default()`；
+  `raw` 模式下生成按钮为「生成上游格式 factory.bin…」。
 - `Cargo.toml`：GUI 二进制加 `required-features = ["gui"]`，无窗口依赖的环境也能用
   `--no-default-features` 编译 lib / CLI / inspect。
 
 ### 为什么不全盘照搬上游
 
 上游 11-13 的重构删除了 magic / 目录表 / CRC，而本仓的紧凑镜像、
-`PON_MODULE_EEPROM`（`0x0102`）、`WIFI_NV_CFG`（`0x0103`）、`summary()` 校验和
-PT1570 / PT1570-R10 两个机型都建立在目录表之上。直接覆盖等于丢弃全部增强，
-所以采用「双格式可切换」。`raw` 模式严格对齐上游：字段表固定 10 项，若同时指定了
-`--pon-eeprom` / `--wifi-nvcfg` 或 `--compact`，CLI 与 GUI 都会**明确报错**，
-绝不静默丢弃数据。
+`WIFI_NV_CFG`（`0x0103`）、`summary()` 校验和 PT1570 / PT1570-R10 两个机型
+都建立在目录表之上。直接覆盖等于丢弃全部增强，所以采用「双格式可切换」。
+`raw` 模式严格对齐上游：字段表固定 10 项，仅 `--compact` 会明确报错。
+本仓的 `0x0103` 是**原样存档段**，raw 格式没有对应位置，因此只跳过这一段、
+并在 CLI 报告与 GUI 结果区明确列出；由 NV_CFG 组装出的 Wi-Fi 校准段
+（`0x0100` / `0x0101`）属于上游固定字段表，**照常写入镜像**，
+绝不连同原档一起丢掉。详见「raw 模式下的 NV_CFG」小节。
+
+### raw 模式下的 NV_CFG（只写校准，不写原档）
+
+PT1570 的 `mtd3_static_conf.bin` 是**源数据**：导入后用它组装
+`WIFI_CAL_RADIO0`（5G，tag `0x0100`）/ `WIFI_CAL_RADIO1`（2G，tag `0x0101`），
+这两段本就在上游 `RAW_FIELDS` 的固定偏移 `0x2000` / `0x3000`。NV_CFG 原档
+（`0x0103`）只是**存档**，上游格式没有槽位。
+
+| 段 | `RTLFACT1` | `raw`（默认） |
+|---|---|---|
+| `0x0100` / `0x0101` Wi-Fi 校准（由 NV_CFG 组装） | 写入 | **写入** |
+| `0x0103` NV_CFG 原档 | 写入 | 跳过并明确列出 |
+| 其余 10 个固定字段 | 写入 | 写入 |
+
+实现为 `layout::filter_raw_sections()`：只过滤这一个 tag，其他未知 tag 仍由
+`build_raw()` 报错兜底。CLI 在段表后打印 `note: archive-only sections dropped…`，
+GUI 状态栏与结果区显示「已跳过 N 个原档存档段」。**数据不会丢**：切换格式不清除
+界面里已导入的存档，切回 `RTLFACT1` 即可重新写入原档。
+
+> 端到端用例 `tests/nvcfg_raw.rs` 覆盖真实链路：`normalize_nv_cfg` →
+> `flash_calibration_nv` → `filter_raw_sections` → `build_raw`，断言 64 KiB 镜像里
+> `0x2000` / `0x3000` 有校准数据、`0x6000`（原 EEPROM 槽）/ `0x7000` 保持 `0xFF`，
+> 且 RTLFACT1 分支未回归；`tests/default_raw.rs` 锁定默认格式与 R10 规格。
 
 ### 兼容性验证
 
 ```bash
-# 21 个单测（含 5 个新增的 raw / 格式解析用例）
+# 核心库单测（含 raw 格式、段过滤、格式解析与默认格式用例）
 cargo test --locked --no-default-features --lib
+# 端到端：NV_CFG 只写校准、不写原档，且 RTLFACT1 未回归
+cargo test --locked --no-default-features --test nvcfg_raw
+# 规格回归：默认 raw、youhua-pt1570-r10 别名与 64 KiB 镜像
+cargo test --locked --no-default-features --test default_raw
 
 # 跨语言逐字节比对：按上游 layout.rs 逻辑生成 golden，与 Rust example 产物比较
 python3 scripts/verify_upstream_compat.py
@@ -301,28 +331,35 @@ GUI 代码需 **rustc ≥ 1.95**（egui/eframe 0.36.2 的要求，与原仓相�
 
 ### 图形界面
 
-1. 顶栏选机型（默认天邑 TYFZA1）与**输出格式**（默认 `RTLFACT1`）；
+1. 顶栏选机型（默认天邑 TYFZA1）与**输出格式**（默认 `raw`）；
 2. 选 / 拖入 `mtd1_env.bin`（env 机型必需）、可选 `mtd2_env2.bin`、
    `mtd4_ubi_device.bin`（必需）——文件就位后自动在后台线程提取（大镜像不卡界面）；
 3. 查看身份信息（含派生 MAC 表：5G=base+2、2.4G=base+1，仅 tyfza1）、校准段
-   （可单独导出）、UBI 卷列表；「PON 模块 EEPROM (A2h)」行可载入 dump；
-4. `RTLFACT1` 下：「生成 factory.bin…」存 8 MiB，或「导出紧凑镜像 (64 KiB)…」；
-   切到「上游 raw（固定偏移）」后按钮变为「生成上游格式 factory.bin…」，镜像大小
-   按机型（8 MiB / 64 KiB）。段表（偏移 / 大小 / CRC32）直接显示。
+   （可单独导出）、UBI 卷列表；
+4. 默认 `raw`：直接点「生成上游格式 factory.bin…」，镜像大小按机型（8 MiB / 64 KiB）；
+   段表（偏移 / 大小 / CRC32）直接显示，NV_CFG **原档不写入**（结果区列出被跳过的段），
+   但由 NV_CFG 组装的 `WIFI_CAL_RADIO0/1` 照常写入。切到 `RTLFACT1` 后按钮变为
+   「生成 factory.bin…」（8 MiB）/「导出紧凑镜像 (64 KiB)…」，并恢复原档写入。
 
 ### 命令行
 
 ```bash
+# 默认即为 raw：tyfza1 输出 8 MiB，其余机型输出 64 KiB
 rtl9617c-factory build --model tyfza1 --env mtd1_env.bin --env2 mtd2_env2.bin \
     --device mtd4_ubi_device.bin -o factory.bin
-rtl9617c-factory build --model tyfza1 ... --compact -o factory-compact.bin
-rtl9617c-factory build --model pt1570 ... --pon-eeprom pon-a2h-dump.bin -o factory.bin
+rtl9617c-factory build --model youhua-pt1570-r10 ... -o factory-64k.bin
 rtl9617c-factory dump  --model tyfza1 --env mtd1_env.bin --device mtd4_ubi_device.bin
 
-# 上游 11-13 之后的纯固定偏移格式：产物与上游当前版逐字节一致
-rtl9617c-factory build --model tianyi-tyfza1-2p5g --format raw ... -o factory-upstream.bin
-# 上游长机型名可用；raw 下 PT1500-H10 的 64 KiB 就是正式刷写镜像
-rtl9617c-factory build --model youhua-pt1500-h10-ct-2p5g --format raw ... -o factory-64k.bin
+# 显式切回 RTLFACT1：完整 8 MiB 或 64 KiB 紧凑存档镜像
+rtl9617c-factory build --model tyfza1 --format rtl1 ... -o factory-rtl1.bin
+rtl9617c-factory build --model tyfza1 --format rtl1 --compact ... -o factory-compact.bin
+
+# 上游长机型名同样可用；raw 下 PT1500-H10 / R10 的 64 KiB 就是正式镜像
+rtl9617c-factory build --model tianyi-tyfza1-2p5g ... -o factory-upstream.bin
+rtl9617c-factory build --model youhua-pt1500-h10-ct-2p5g ... -o factory-64k.bin
+# raw + NV_CFG：原档不写入，仅用它组装 Wi-Fi 校准段（PT1570 64 KiB）
+rtl9617c-factory build --model pt1570 --wifi-nvcfg mtd3_static_conf.bin \
+    --env mtd1_env.bin --device mtd4_ubi_device.bin -o factory-64k.bin
 
 # 备份分析：env 变量 / UBI 卷 / UBIFS 文件 / XML 字段 / 校准内容 / 内嵌 MAC 定位
 rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin [model]
@@ -331,14 +368,16 @@ rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin [model]
 ## 与上游 CLI 的一致性
 
 GUI 与 CLI 共用同一份核心代码（`src/` 下 `env` / `ubi` / `ubifs` / `xml` / `calib`
-/ `profile` / `layout` / `crc` 八个模块，底层解析逻辑未改动），两者产出的 factory.bin
-除 header `0x18` 处 8 字节 `generation` 时间戳外**逐字节相同**。本仓相对上游新增：
-pt1570 机型（model id 3）、紧凑镜像（`--compact` / `build_compact`）、
-`PON_MODULE_EEPROM`（tag `0x0102`）、`inspect` 分析工具。
+/ `profile` / `layout` / `crc` 八个模块，底层解析逻辑未改动），**同一输出格式下**
+两者产出的 factory.bin 除 header `0x18` 处 8 字节 `generation` 时间戳外**逐字节相同**
+（`raw` 格式无 generation 字段，故完全一致）。本仓相对上游新增：
+pt1570 / pt1570-r10 机型、紧凑镜像（`--compact` / `build_compact`）、
+`WIFI_NV_CFG`（tag `0x0103`）、`inspect` 分析工具。
 
-> 说明：这里的「与 CLI 一致」指**本仓自带的 `src/bin/cli.rs`**（基于上游 10-28 初版）。
-> 上游 `lyq1996` 仓库在 11-13 重构后已与本格式分叉；要与上游当前版对齐，请用
-> `--format raw`（GUI 顶栏切换）。本次同步详见「与上游同步」章节。
+> 说明：这里的「与 CLI 一致」指**本仓自带的 `src/bin/cli.rs`**。r4 起 CLI 与 GUI
+> 默认都是 `raw`，默认产物与上游当前版对齐；只有显式 `--format rtl1` 才走本仓
+> 的 `RTLFACT1` 格式（基于上游 10-28 初版，已与上游当前版分叉）。
+> 本次同步详见「与上游同步」章节。
 
 ## 构建与运行
 
@@ -399,9 +438,12 @@ rtl9617c-factory-gui/
 │   └── raw_sample.rs          # 生成 raw 格式样例镜像（供上游 golden 比对）
 ├── scripts/
 │   └── verify_upstream_compat.py  # 跨语言逐字节兼容性验证
+├── tests/
+│   ├── nvcfg_raw.rs           # 端到端：NV_CFG 只写校准、不写原档
+│   └── default_raw.rs         # 规格回归：默认 raw / R10 64 KiB / 长名别名
 └── src/
     ├── lib.rs        # 挂载核心模块
-    ├── calib.rs      # Wi-Fi 校准 TYFC0003 组装 + A2h 转储校验（上游 + 本仓）
+    ├── calib.rs      # Wi-Fi 校准 TYFC0003 组装 + NV_CFG 归一化/校验（上游 + 本仓）
     ├── crc.rs        # CRC32：zlib 式 + 寄存器式（上游）
     ├── env.rs        # U-Boot env 解析（上游）
     ├── layout.rs     # RTLFACT1 + 上游 raw 双格式布局 / build / summary（上游 + 本仓）
@@ -410,7 +452,7 @@ rtl9617c-factory-gui/
     ├── ubifs.rs      # UBIFS 文件提取（上游）
     ├── xml.rs        # config_hs.xml / config.xml 字段读取（上游）
     └── bin/
-        ├── cli.rs          # CLI（build/dump；--format / --compact / --pon-eeprom / --wifi-nvcfg）
+        ├── cli.rs          # CLI（build/dump；默认 raw，--format / --compact / --wifi-nvcfg）
         ├── inspect.rs      # 备份分析工具（本仓）
         └── gui/
             ├── main.rs     # egui 图形界面（本仓，含输出格式切换）

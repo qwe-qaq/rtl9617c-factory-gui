@@ -32,11 +32,9 @@ pub const FIELDS: &[FieldSpec] = &[
     FieldSpec { tag: 0x0110, name: "BOSA_CALIBRATION", offset: 0x4000, capacity: 0x0800 },
     FieldSpec { tag: 0x0111, name: "BOSA_OLT_CALIBRATION", offset: 0x4800, capacity: 0x0400 },
     FieldSpec { tag: 0x0112, name: "XTEMP_CALIBRATION", offset: 0x5000, capacity: 0x1000 },
-    // env 机型（pt1500-h10 / pt1570）的 PON 口校准不在 flash 里，而在光模块
-    // A2h EEPROM（SFF-8472，I2C 0x51）。这里存用户从原厂固件 i2cdump 得到的
-    // 转储：0x0000-0x00FF 为 A2h 基页（0x5F 为 CC_EXT 校验和），其后可按
-    // README 追加私有页（0x80 / 0x81 / T2 / T3，各 128B）。
-    FieldSpec { tag: 0x0102, name: "PON_MODULE_EEPROM", offset: 0x6000, capacity: 0x400 },
+    // 0x6000 处原本预留的 PON_MODULE_EEPROM（tag 0x0102）已移除：
+    // env 机型的 PON 口校准在光模块 A2h EEPROM，不在任何 flash 分区，
+    // 备份里没有这段数据，factory.bin 无需包含它。该偏移保持留空。
     // pt1570 的 Wi-Fi 校准字段在 mtd3_static_conf 的 NV_CFG 区（/** NV_CFG **/ +
     // KEY=VALUE\0 列表），缺 TYFC0003 组装所需的 TSSI DIFF 字段，故按原文存档，
     // 不组装。消费端（WLAN 驱动）直接读 NV 分区，此处为存档用途。
@@ -62,9 +60,13 @@ pub fn spec(tag: u16) -> Result<&'static FieldSpec, String> {
 /// 输出格式。`RtlFact1` 是本仓（及上游 10-28 初版）的带头部/目录/CRC 格式，
 /// 支持紧凑镜像、model id 与本仓新增字段；`UpstreamRaw` 是上游 11-13 之后的
 /// 纯固定偏移格式，字段表固定、无校验、镜像大小由机型决定。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// 默认导出为 `UpstreamRaw`（目标设备按上游规范读取 64 KiB / 8 MiB 镜像）。
+/// 需要紧凑镜像或 NV_CFG 原档存档时，显式指定 `--format rtl1` 或在 GUI 下拉切换。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum OutputFormat {
     RtlFact1,
+    #[default]
     UpstreamRaw,
 }
 
@@ -112,7 +114,7 @@ pub fn raw_field(name: &str) -> Result<&'static RawField, String> {
         .ok_or_else(|| format!("unknown upstream factory field {name}"))
 }
 
-/// 本仓 tag → 上游字段名。返回 `None` 表示本仓新增字段（0x0102 / 0x0103）：
+/// 本仓 tag → 上游字段名。返回 `None` 表示本仓新增字段（0x0103）：
 /// 上游固定字段表没有对应位置，raw 模式必须显式报错，绝不静默丢弃数据。
 pub fn upstream_name(tag: u16) -> Option<&'static str> {
     match tag {
@@ -128,6 +130,26 @@ pub fn upstream_name(tag: u16) -> Option<&'static str> {
         0x0200 => Some("FPGA_IMAGE"),
         _ => None,
     }
+}
+
+/// 上游 raw 格式只有固定的 10 个字段，0x0103（WIFI_NV_CFG 原档）是「原样存档」
+/// 段而非产线镜像所需数据。注意：由 NV_CFG 组装出的 Wi-Fi 校准段是
+/// 0x0100 / 0x0101（WIFI_CAL_RADIO0/1），本就属于上游字段表，必须照常写入。
+///
+/// 因此 raw 模式只跳过这一个存档段，返回 (可写入段, 跳过说明)，由调用方
+/// 明确展示给用户，而不是整个 build 失败、也不是静默丢数据。
+/// 其他未知 tag 原样保留，仍由 `build_raw` 报错兜底。
+pub fn filter_raw_sections(sections: &[Section]) -> (Vec<Section>, Vec<String>) {
+    let mut kept = Vec::with_capacity(sections.len());
+    let mut skipped = Vec::new();
+    for s in sections {
+        if s.tag == 0x0103 {
+            skipped.push(format!("WIFI_NV_CFG (tag 0x0103, {} 字节)", s.data.len()));
+        } else {
+            kept.push(Section { tag: s.tag, data: s.data.clone() });
+        }
+    }
+    (kept, skipped)
 }
 
 /// 按上游 `layout::build` 的语义生成镜像：整片 0xFF，字段直接落在固定偏移，
@@ -477,31 +499,16 @@ mod tests {
     }
 
     #[test]
-    fn pon_module_eeprom_field() {
-        let s = spec(0x0102).unwrap();
-        assert_eq!(s.offset, 0x6000);
-        assert_eq!(s.capacity, 0x400);
-        let image = build(
-            MODEL_TYFZA1,
-            0,
-            &[Section { tag: 0x0102, data: vec![0x5a; 256] }],
-        )
-        .unwrap();
-        assert_eq!(image[0x6000..0x6100], [0x5a; 256]);
+    fn removed_eeprom_tag_is_rejected() {
+        // 0x0102（PON_MODULE_EEPROM）已从布局表移除：备份里没有这段数据，
+        // 不允许再把它写进 factory.bin。
+        assert!(spec(0x0102).is_err());
         assert!(build(
             MODEL_TYFZA1,
             0,
-            &[Section { tag: 0x0102, data: vec![0; 0x401] }]
-        )
-        .is_err());
-        // 紧凑镜像同样容纳该段（0x6000 < COMPACT_SIZE）
-        let compact = build_compact(
-            MODEL_TYFZA1,
-            0,
             &[Section { tag: 0x0102, data: vec![0x5a; 256] }],
         )
-        .unwrap();
-        assert_eq!(compact[0x6000..0x6100], [0x5a; 256]);
+        .is_err());
     }
 
     #[test]
@@ -591,10 +598,10 @@ mod tests {
             ]
         )
         .is_err());
-        // 本仓新增字段必须显式拒绝，绝不静默丢弃
+        // 未知 / 本仓新增 tag 必须显式拒绝，绝不静默丢弃
         assert!(build_raw(
             0x10000,
-            &[Section { tag: 0x0102, data: vec![0x5a; 16] }]
+            &[Section { tag: 0x0103, data: vec![0x5a; 16] }]
         )
         .is_err());
     }
@@ -623,5 +630,41 @@ mod tests {
         assert_eq!(OutputFormat::parse("raw").unwrap(), OutputFormat::UpstreamRaw);
         assert_eq!(OutputFormat::parse("upstream").unwrap(), OutputFormat::UpstreamRaw);
         assert!(OutputFormat::parse("bogus").is_err());
+        // 默认导出为上游 raw
+        assert_eq!(OutputFormat::default(), OutputFormat::UpstreamRaw);
+    }
+
+    #[test]
+    fn raw_filter_keeps_wifi_calibration_drops_archive_only() {
+        // 模拟 pt1570：NV_CFG 原档(598B) 已导入，并据此组装出两段 Wi-Fi 校准。
+        // PON_MODULE_EEPROM(0x0102) 已移除，不再出现。
+        let sections = vec![
+            Section { tag: 0x0100, data: vec![0x5a; 284] }, // WIFI_CAL_RADIO0
+            Section { tag: 0x0101, data: vec![0x5b; 284] }, // WIFI_CAL_RADIO1
+            Section { tag: 0x0103, data: vec![0xcc; 598] }, // WIFI_NV_CFG 原档
+        ];
+        let (kept, skipped) = filter_raw_sections(&sections);
+        assert_eq!(kept.len(), 2, "校准段必须保留");
+        assert_eq!(kept[0].tag, 0x0100);
+        assert_eq!(kept[1].tag, 0x0101);
+        assert_eq!(skipped.len(), 1, "只有 NV_CFG 原档应被列出");
+        assert!(skipped[0].contains("WIFI_NV_CFG"));
+        assert!(skipped[0].contains("598"));
+
+        let bin = build_raw(0x0001_0000, &kept).unwrap();
+        assert_eq!(bin.len(), 0x0001_0000);
+        // 校准数据落在上游固定偏移 0x2000 / 0x3000
+        assert_eq!(&bin[0x2000..0x2000 + 284], &[0x5au8; 284][..]);
+        assert_eq!(&bin[0x3000..0x3000 + 284], &[0x5bu8; 284][..]);
+        // 0x6000（原 EEPROM 槽）/ 0x7000（NV_CFG 槽）都保持 0xFF
+        assert!(bin[0x6000..0x8000].iter().all(|&b| b == 0xff));
+        // 底层防御仍在：未过滤就交给 build_raw 会报错
+        assert!(build_raw(0x0001_0000, &sections).is_err());
+        // 其他未知 tag 不会被过滤掉，仍由 build_raw 兜底报错
+        assert!(build_raw(
+            0x0001_0000,
+            &[Section { tag: 0x01ff, data: vec![0x11; 4] }]
+        )
+        .is_err());
     }
 }
