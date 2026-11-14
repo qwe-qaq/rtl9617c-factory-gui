@@ -6,6 +6,11 @@ Rust + egui 图形工具，用于**提取 / 生成 / 对照** RTL9617C 平台 GP
 界面模式参考同系列 [`h3c-factory`](https://github.com/lyq1996/h3c-factory)
 （fiberhome-factory 系）。
 
+> **2026-11-14 上游同步**：本仓现支持两种输出格式。默认仍是本仓增强的
+> `RTLFACT1`（带头部 / 目录 / CRC）；新增 `--format raw`（GUI 顶栏可切换）对应上游
+> 2026-11-13 重构后的纯固定偏移格式，产物与上游当前版逐字节一致。
+> 详见下文「与上游同步」章节。
+
 支持机型（`--model` / 界面切换）：
 
 | 机型 | 设备 | 产线数据来源 | PON 口校准 | 紧凑镜像 |
@@ -232,17 +237,78 @@ i2cset -y -f 0 0x51 0x7F 0x00                          # 回基页
 > vermagic 绑死 `5.10.70 SMP aarch64`）。本功能定位是**存档与迁移**。先 dump 再
 > 刷机；刷机过程**不要 `mtd erase ubi_device`**（会连设备身份文件一起丢）。
 
+## 与上游同步（2026-11-14）
+
+上游 `lyq1996/rtl9617c-factory` 在 2026-11-13 提交 `7a2455c`
+（`layout: output fields at fixed offsets`）把镜像格式改成了**无 magic / 无头部 /
+无目录 / 无 CRC 的纯固定偏移布局**，机型也改成了长名。本仓原本基于上游 10-28 的
+初版，两者产物互不兼容。本次同步把上游的新格式做成**第二种可选输出格式**，
+不替换原有的 `RTLFACT1`，因此 GUI 的全部增强功能都保留。
+
+### 两种格式
+
+| | `RTLFACT1`（默认，`--format rtl1`） | `raw`（`--format raw`） |
+|---|---|---|
+| 镜像头 | `RTLFACT1` magic + version / size / model id / generation | 无（前 `0x1000` 字节全 `0xFF`） |
+| 目录 | `0x200`–`0x400`，32 条 × 16 B（tag / offset / size / CRC） | 无（该区域全 `0xFF`） |
+| 校验 | `image_crc` / `table_crc` / `header_crc` 三重 CRC32 | 无 |
+| 字段索引 | tag（可容纳本仓新增 `0x0102` / `0x0103`） | 固定 10 个字段，按 name + 固定偏移 |
+| 镜像大小 | 统一 8 MiB；`--compact` 另有 64 KiB 存档镜像 | 按机型：8 MiB / 64 KiB（**64 KiB 可直接刷写**） |
+| 反解析 | `summary()` 校验 magic 与 CRC | 无校验，`dump` 只打印提取字段 |
+| 与上游当前版 | 不兼容 | **逐字节一致**（已验证） |
+
+> ⚠️ `64 KiB` 在两种格式里语义相反：本仓 `RTLFACT1` 的 64 KiB 是**存档用**紧凑镜像，
+> 不可刷写；上游 `raw` 的 64 KiB 是 PT1500-H10 的**正式可刷写**镜像。
+
+### 同步了什么
+
+- `src/layout.rs`：新增 `OutputFormat`、`RAW_FIELDS`（与上游 `FIELDS` 逐项一致）、
+  `upstream_name()` tag 映射、`build_raw()`、`summarize_raw()`；原有 `build()` /
+  `build_compact()` / `summary()` 逻辑未改。
+- `src/profile.rs`：新增 `MODEL_SPECS` 机型表，注册上游长机型名
+  `tianyi-tyfza1-2p5g` / `youhua-pt1500-h10-ct-2p5g` 作为别名，并按机型给出
+  `upstream_image_size`；本仓 4 个短机型与 model id 全部保留。
+- `src/bin/cli.rs`：新增 `--format <rtl1|raw>`，`dump` 同样接受长机型名。
+- `src/bin/gui/main.rs`：顶栏新增「输出格式」下拉框；`raw` 模式下生成按钮改为
+  「生成上游格式 factory.bin…」。
+- `Cargo.toml`：GUI 二进制加 `required-features = ["gui"]`，无窗口依赖的环境也能用
+  `--no-default-features` 编译 lib / CLI / inspect。
+
+### 为什么不全盘照搬上游
+
+上游 11-13 的重构删除了 magic / 目录表 / CRC，而本仓的紧凑镜像、
+`PON_MODULE_EEPROM`（`0x0102`）、`WIFI_NV_CFG`（`0x0103`）、`summary()` 校验和
+PT1570 / PT1570-R10 两个机型都建立在目录表之上。直接覆盖等于丢弃全部增强，
+所以采用「双格式可切换」。`raw` 模式严格对齐上游：字段表固定 10 项，若同时指定了
+`--pon-eeprom` / `--wifi-nvcfg` 或 `--compact`，CLI 与 GUI 都会**明确报错**，
+绝不静默丢弃数据。
+
+### 兼容性验证
+
+```bash
+# 21 个单测（含 5 个新增的 raw / 格式解析用例）
+cargo test --locked --no-default-features --lib
+
+# 跨语言逐字节比对：按上游 layout.rs 逻辑生成 golden，与 Rust example 产物比较
+python3 scripts/verify_upstream_compat.py
+```
+
+验证脚本同时覆盖 64 KiB 与 8 MiB 两种镜像大小，断言前 `0x1000` 字节与目录区
+全为 `0xFF`、字段落在固定偏移。结果：两种大小均与上游 golden 逐字节一致。
+GUI 代码需 **rustc ≥ 1.95**（egui/eframe 0.36.2 的要求，与原仓相同）。
+
 ## 用法
 
 ### 图形界面
 
-1. 顶栏选机型（默认天邑 TYFZA1）；
+1. 顶栏选机型（默认天邑 TYFZA1）与**输出格式**（默认 `RTLFACT1`）；
 2. 选 / 拖入 `mtd1_env.bin`（env 机型必需）、可选 `mtd2_env2.bin`、
    `mtd4_ubi_device.bin`（必需）——文件就位后自动在后台线程提取（大镜像不卡界面）；
 3. 查看身份信息（含派生 MAC 表：5G=base+2、2.4G=base+1，仅 tyfza1）、校准段
    （可单独导出）、UBI 卷列表；「PON 模块 EEPROM (A2h)」行可载入 dump；
-4. 「生成 factory.bin…」存 8 MiB，或「导出紧凑镜像 (64 KiB)…」；段表（偏移 /
-   大小 / CRC32）直接显示。
+4. `RTLFACT1` 下：「生成 factory.bin…」存 8 MiB，或「导出紧凑镜像 (64 KiB)…」；
+   切到「上游 raw（固定偏移）」后按钮变为「生成上游格式 factory.bin…」，镜像大小
+   按机型（8 MiB / 64 KiB）。段表（偏移 / 大小 / CRC32）直接显示。
 
 ### 命令行
 
@@ -253,6 +319,11 @@ rtl9617c-factory build --model tyfza1 ... --compact -o factory-compact.bin
 rtl9617c-factory build --model pt1570 ... --pon-eeprom pon-a2h-dump.bin -o factory.bin
 rtl9617c-factory dump  --model tyfza1 --env mtd1_env.bin --device mtd4_ubi_device.bin
 
+# 上游 11-13 之后的纯固定偏移格式：产物与上游当前版逐字节一致
+rtl9617c-factory build --model tianyi-tyfza1-2p5g --format raw ... -o factory-upstream.bin
+# 上游长机型名可用；raw 下 PT1500-H10 的 64 KiB 就是正式刷写镜像
+rtl9617c-factory build --model youhua-pt1500-h10-ct-2p5g --format raw ... -o factory-64k.bin
+
 # 备份分析：env 变量 / UBI 卷 / UBIFS 文件 / XML 字段 / 校准内容 / 内嵌 MAC 定位
 rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin [model]
 ```
@@ -260,17 +331,29 @@ rtl9617c-factory-inspect mtd1_env.bin mtd2_env2.bin mtd4_ubi_device.bin [model]
 ## 与上游 CLI 的一致性
 
 GUI 与 CLI 共用同一份核心代码（`src/` 下 `env` / `ubi` / `ubifs` / `xml` / `calib`
-/ `profile` / `layout` / `crc` 八个模块，上游逻辑未改动），两者产出的 factory.bin
+/ `profile` / `layout` / `crc` 八个模块，底层解析逻辑未改动），两者产出的 factory.bin
 除 header `0x18` 处 8 字节 `generation` 时间戳外**逐字节相同**。本仓相对上游新增：
 pt1570 机型（model id 3）、紧凑镜像（`--compact` / `build_compact`）、
 `PON_MODULE_EEPROM`（tag `0x0102`）、`inspect` 分析工具。
 
+> 说明：这里的「与 CLI 一致」指**本仓自带的 `src/bin/cli.rs`**（基于上游 10-28 初版）。
+> 上游 `lyq1996` 仓库在 11-13 重构后已与本格式分叉；要与上游当前版对齐，请用
+> `--format raw`（GUI 顶栏切换）。本次同步详见「与上游同步」章节。
+
 ## 构建与运行
 
 ```bash
+# 需要 rustc >= 1.95（egui/eframe 0.36.2 的 rust-version 要求）
 cargo build --release --locked
 # Windows 本地构建需要 MSVC Build Tools（提供 link.exe）；
-# Linux 需窗口后端：cargo build --release --features linux-x11
+# Linux 需窗口后端：cargo build --release --locked --features linux-x11
+
+# 无窗口依赖的环境（服务器 / CI）只编译核心库 + CLI + inspect + example：
+cargo test  --locked --no-default-features --lib
+cargo build --locked --no-default-features --bins --examples
+
+# 验证 raw 格式与上游当前版逐字节一致（64 KiB / 8 MiB 两种大小）：
+python3 scripts/verify_upstream_compat.py
 ```
 
 仓库附带 `Cargo.lock`，锁定 eframe / egui **0.36.2**（本代码所针对的 API）。上游
@@ -312,21 +395,25 @@ rtl9617c-factory-gui/
 ├── Cargo.lock                 # 锁定 egui/eframe 0.36.2
 ├── LICENSE                    # GPL-2.0-only
 ├── .github/workflows/build.yml
+├── examples/
+│   └── raw_sample.rs          # 生成 raw 格式样例镜像（供上游 golden 比对）
+├── scripts/
+│   └── verify_upstream_compat.py  # 跨语言逐字节兼容性验证
 └── src/
     ├── lib.rs        # 挂载核心模块
     ├── calib.rs      # Wi-Fi 校准 TYFC0003 组装 + A2h 转储校验（上游 + 本仓）
     ├── crc.rs        # CRC32：zlib 式 + 寄存器式（上游）
     ├── env.rs        # U-Boot env 解析（上游）
-    ├── layout.rs     # RTLFACT1 布局 / build / build_compact / summary（上游 + 本仓）
-    ├── profile.rs    # 机型提取：Tyfza1 / Pt1500H10 / Pt1570（上游 + 本仓）
+    ├── layout.rs     # RTLFACT1 + 上游 raw 双格式布局 / build / summary（上游 + 本仓）
+    ├── profile.rs    # 机型表（短名 + 上游长别名）/ 4 机型提取（上游 + 本仓）
     ├── ubi.rs        # UBI 容器解析（上游）
     ├── ubifs.rs      # UBIFS 文件提取（上游）
     ├── xml.rs        # config_hs.xml / config.xml 字段读取（上游）
     └── bin/
-        ├── cli.rs          # 上游 CLI（build/dump，--compact/--pon-eeprom 为本仓新增）
+        ├── cli.rs          # CLI（build/dump；--format / --compact / --pon-eeprom / --wifi-nvcfg）
         ├── inspect.rs      # 备份分析工具（本仓）
         └── gui/
-            ├── main.rs     # egui 图形界面（本仓）
+            ├── main.rs     # egui 图形界面（本仓，含输出格式切换）
             └── font.rs     # CJK 字体安装（自 h3c-factory 移植）
 ```
 

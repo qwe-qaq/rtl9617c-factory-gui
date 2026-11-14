@@ -147,24 +147,81 @@ fn read_text(files: &ubifs::Files, name: &str) -> Result<String, String> {
     String::from_utf8(data.clone()).map_err(|_| format!("{name} is not valid UTF-8"))
 }
 
+/// 机型表：本仓短名与上游 2026-11-13 之后的长机型名一一对应。
+/// 上游只定义了前两个机型；后两个是本仓扩展，别名按上游命名规则给出，
+/// `upstream_image_size` 按同类机型推导（env 机型 64 KiB、XML 机型 8 MiB）。
+pub struct ModelSpec {
+    pub key: &'static str,
+    pub upstream_name: &'static str,
+    pub model_id: u32,
+    pub rtl1_image_size: usize,
+    pub upstream_image_size: usize,
+    pub extract: fn(&EnvSet, &UbiImage) -> Result<Extracted, String>,
+}
+
+pub const MODEL_SPECS: &[ModelSpec] = &[
+    ModelSpec {
+        key: "tyfza1",
+        upstream_name: "tianyi-tyfza1-2p5g",
+        model_id: MODEL_TYFZA1,
+        rtl1_image_size: IMAGE_SIZE,
+        upstream_image_size: 0x0080_0000,
+        extract: Tyfza1::extract,
+    },
+    ModelSpec {
+        key: "pt1500-h10",
+        upstream_name: "youhua-pt1500-h10-ct-2p5g",
+        model_id: MODEL_PT1500_H10,
+        rtl1_image_size: IMAGE_SIZE,
+        upstream_image_size: 0x0001_0000,
+        extract: Pt1500H10::extract,
+    },
+    ModelSpec {
+        key: "pt1570",
+        upstream_name: "youhua-pt1570-h10",
+        model_id: MODEL_PT1570,
+        rtl1_image_size: IMAGE_SIZE,
+        upstream_image_size: 0x0001_0000,
+        extract: Pt1570::extract,
+    },
+    ModelSpec {
+        key: "pt1570-r10",
+        upstream_name: "youhua-pt1570-r10",
+        model_id: MODEL_PT1570_R10,
+        rtl1_image_size: IMAGE_SIZE,
+        upstream_image_size: 0x0080_0000,
+        extract: Pt1570R10::extract,
+    },
+];
+
+pub fn model_spec(name: &str) -> Result<&'static ModelSpec, String> {
+    MODEL_SPECS
+        .iter()
+        .find(|m| m.key == name || m.upstream_name == name)
+        .ok_or_else(|| format!("unknown model: {name}"))
+}
+
+/// 接受本仓短名或上游长名，统一返回本仓短名（未知机型原样报错）。
+pub fn canonical(name: &str) -> Result<&'static str, String> {
+    model_spec(name).map(|m| m.key)
+}
+
 pub fn profile(name: &str) -> Result<fn(&EnvSet, &UbiImage) -> Result<Extracted, String>, String> {
-    match name {
-        "tyfza1" => Ok(Tyfza1::extract),
-        "pt1500-h10" => Ok(Pt1500H10::extract),
-        "pt1570" => Ok(Pt1570::extract),
-        "pt1570-r10" => Ok(Pt1570R10::extract),
-        other => Err(format!("unknown model: {other}")),
-    }
+    model_spec(name).map(|m| m.extract)
 }
 
 pub fn model_id(name: &str) -> Result<u32, String> {
-    match name {
-        "tyfza1" => Ok(MODEL_TYFZA1),
-        "pt1500-h10" => Ok(MODEL_PT1500_H10),
-        "pt1570" => Ok(MODEL_PT1570),
-        "pt1570-r10" => Ok(MODEL_PT1570_R10),
-        other => Err(format!("unknown model: {other}")),
-    }
+    model_spec(name).map(|m| m.model_id)
+}
+
+/// 上游 11-13 之后的镜像大小（按机型：8 MiB / 64 KiB）。
+pub fn upstream_image_size(name: &str) -> Result<usize, String> {
+    model_spec(name).map(|m| m.upstream_image_size)
+}
+
+/// 本仓 RTLFACT1 格式的镜像大小（统一 8 MiB）。
+pub fn rtl1_image_size(name: &str) -> Result<usize, String> {
+    model_spec(name).map(|m| m.rtl1_image_size)
 }
 
 pub fn sections(extracted: &Extracted) -> Result<Vec<Section>, String> {

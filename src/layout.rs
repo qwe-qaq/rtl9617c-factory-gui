@@ -51,6 +51,148 @@ pub fn spec(tag: u16) -> Result<&'static FieldSpec, String> {
         .ok_or_else(|| format!("unknown factory tag 0x{tag:04x}"))
 }
 
+// ---------------------------------------------------------------------------
+// 上游 2026-11-13 之后的布局（commit 7a2455c, "layout: output fields at fixed
+// offsets"）：无 magic / 无头部 / 无目录 / 无 CRC，字段按固定偏移直接写入，
+// 其余区域全部 0xFF。这里作为第二种输出格式保留，字段表与上游
+// `layout.rs::FIELDS` 逐项一致，生成的镜像与上游 CLI 逐字节相同。
+// 原有的 RTLFACT1 build / build_compact / summary 完全不动。
+// ---------------------------------------------------------------------------
+
+/// 输出格式。`RtlFact1` 是本仓（及上游 10-28 初版）的带头部/目录/CRC 格式，
+/// 支持紧凑镜像、model id 与本仓新增字段；`UpstreamRaw` 是上游 11-13 之后的
+/// 纯固定偏移格式，字段表固定、无校验、镜像大小由机型决定。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputFormat {
+    RtlFact1,
+    UpstreamRaw,
+}
+
+impl OutputFormat {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "rtl1" | "rtlfact1" | "gui" => Ok(OutputFormat::RtlFact1),
+            "raw" | "upstream" | "upstream-raw" | "fixed" => Ok(OutputFormat::UpstreamRaw),
+            other => Err(format!("unknown output format: {other} (use rtl1 or raw)")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputFormat::RtlFact1 => "rtl1",
+            OutputFormat::UpstreamRaw => "raw",
+        }
+    }
+}
+
+/// 与上游 `layout.rs::FIELDS` 逐项一致（name / offset / capacity）。
+pub struct RawField {
+    pub name: &'static str,
+    pub offset: u32,
+    pub capacity: u32,
+}
+
+pub const RAW_FIELDS: &[RawField] = &[
+    RawField { name: "BASE_MAC", offset: 0x1000, capacity: 0x10 },
+    RawField { name: "EPON_MAC", offset: 0x1010, capacity: 0x06 },
+    RawField { name: "PON_SN", offset: 0x1020, capacity: 0x10 },
+    RawField { name: "DEVICE_SN", offset: 0x1030, capacity: 0x20 },
+    RawField { name: "WIFI_CAL_RADIO0", offset: 0x2000, capacity: 0x1000 },
+    RawField { name: "WIFI_CAL_RADIO1", offset: 0x3000, capacity: 0x1000 },
+    RawField { name: "BOSA_CALIBRATION", offset: 0x4000, capacity: 0x0800 },
+    RawField { name: "BOSA_OLT_CALIBRATION", offset: 0x4800, capacity: 0x0400 },
+    RawField { name: "XTEMP_CALIBRATION", offset: 0x5000, capacity: 0x1000 },
+    RawField { name: "FPGA_IMAGE", offset: 0x10000, capacity: 0x7E0000 },
+];
+
+pub fn raw_field(name: &str) -> Result<&'static RawField, String> {
+    RAW_FIELDS
+        .iter()
+        .find(|f| f.name == name)
+        .ok_or_else(|| format!("unknown upstream factory field {name}"))
+}
+
+/// 本仓 tag → 上游字段名。返回 `None` 表示本仓新增字段（0x0102 / 0x0103）：
+/// 上游固定字段表没有对应位置，raw 模式必须显式报错，绝不静默丢弃数据。
+pub fn upstream_name(tag: u16) -> Option<&'static str> {
+    match tag {
+        0x0001 => Some("BASE_MAC"),
+        0x0002 => Some("EPON_MAC"),
+        0x0010 => Some("PON_SN"),
+        0x0011 => Some("DEVICE_SN"),
+        0x0100 => Some("WIFI_CAL_RADIO0"),
+        0x0101 => Some("WIFI_CAL_RADIO1"),
+        0x0110 => Some("BOSA_CALIBRATION"),
+        0x0111 => Some("BOSA_OLT_CALIBRATION"),
+        0x0112 => Some("XTEMP_CALIBRATION"),
+        0x0200 => Some("FPGA_IMAGE"),
+        _ => None,
+    }
+}
+
+/// 按上游 `layout::build` 的语义生成镜像：整片 0xFF，字段直接落在固定偏移，
+/// 不写 magic、不写头、不写目录、不算 CRC。检查项（重复段 / 容量 / 越界）
+/// 与上游一致。
+pub fn build_raw(image_size: usize, sections: &[Section]) -> Result<Vec<u8>, String> {
+    let mut image = vec![0xffu8; image_size];
+    let mut written: Vec<&'static str> = Vec::new();
+    for section in sections {
+        let name = upstream_name(section.tag).ok_or_else(|| {
+            format!(
+                "section tag 0x{:04x} has no upstream-layout counterpart; use --format rtl1",
+                section.tag
+            )
+        })?;
+        let spec = raw_field(name)?;
+        if written.contains(&name) {
+            return Err(format!("duplicate section {name}"));
+        }
+        if section.data.len() > spec.capacity as usize {
+            return Err(format!(
+                "section {} exceeds capacity: {} > {}",
+                name,
+                section.data.len(),
+                spec.capacity
+            ));
+        }
+        let offset = spec.offset as usize;
+        let end = offset + section.data.len();
+        if end > image_size {
+            return Err(format!(
+                "section {} exceeds image size: 0x{end:x} > 0x{image_size:x}",
+                name
+            ));
+        }
+        image[offset..end].copy_from_slice(&section.data);
+        written.push(name);
+    }
+    Ok(image)
+}
+
+/// raw 格式的段表（供 CLI / GUI 打印，字段与上游 `main.rs` 的 build 输出一致）。
+pub fn summarize_raw(sections: &[Section]) -> Result<Vec<SummaryEntry>, String> {
+    let mut entries: Vec<SummaryEntry> = sections
+        .iter()
+        .map(|s| {
+            let name = upstream_name(s.tag).ok_or_else(|| {
+                format!(
+                    "section tag 0x{:04x} has no upstream-layout counterpart; use --format rtl1",
+                    s.tag
+                )
+            })?;
+            let spec = raw_field(name)?;
+            Ok(SummaryEntry {
+                name: spec.name,
+                offset: spec.offset,
+                size: s.data.len() as u32,
+                crc: zlib(&s.data),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_by_key(|e| e.offset);
+    Ok(entries)
+}
+
 fn header_crc(image: &[u8]) -> u32 {
     let seed = register(&image[0x28..0x7C], SEED);
     let seed = register(&image[0x18..0x24], seed);
@@ -390,5 +532,96 @@ mod tests {
             &[Section { tag: 0x0103, data: vec![0; 0x401] }]
         )
         .is_err());
+    }
+
+    // ---- 与上游 11-13 固定偏移布局的一致性 --------------------------------
+
+    /// 独立参考实现：绕过 build_raw，直接按上游规则往 0xFF 数组里写字节。
+    fn upstream_reference(size: usize, sections: &[(usize, &[u8])]) -> Vec<u8> {
+        let mut image = vec![0xffu8; size];
+        for (offset, data) in sections {
+            image[*offset..*offset + data.len()].copy_from_slice(data);
+        }
+        image
+    }
+
+    #[test]
+    fn raw_matches_upstream_reference_byte_for_byte() {
+        let mac = [1u8, 2, 3, 4, 5, 6];
+        let sn = b"TYZDD0046AB9\0";
+        let sections = [
+            Section { tag: 0x0002, data: mac.to_vec() },
+            Section { tag: 0x0010, data: sn.to_vec() },
+        ];
+        let image = build_raw(0x10000, &sections).unwrap();
+        let expected = upstream_reference(
+            0x10000,
+            &[(0x1010, &mac[..]), (0x1020, &sn[..])],
+        );
+        assert_eq!(image, expected);
+        // 无 magic / 无头 / 无目录 / 无 CRC：前 0x1000 字节与目录区全为 0xFF
+        assert!(image[0..0x1000].iter().all(|&b| b == 0xff));
+        assert!(image[0x200..0x400].iter().all(|&b| b == 0xff));
+        assert!(image[0..0x30].iter().all(|&b| b == 0xff));
+        assert_eq!(image[0x1020 + 13], 0xff);
+    }
+
+    #[test]
+    fn raw_64k_image_size_and_section_table() {
+        let sections = [Section { tag: 0x0001, data: vec![0xaa; 10] }];
+        let image = build_raw(0x10000, &sections).unwrap();
+        assert_eq!(image.len(), 0x10000);
+        let entries = summarize_raw(&sections).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "BASE_MAC");
+        assert_eq!(entries[0].offset, 0x1000);
+        assert_eq!(entries[0].size, 10);
+        assert_eq!(entries[0].crc, zlib(&sections[0].data));
+    }
+
+    #[test]
+    fn raw_rejects_oversize_duplicate_and_unknown_tag() {
+        assert!(build_raw(0x2000, &[Section { tag: 0x0010, data: vec![0x41; 32] }]).is_err());
+        assert!(build_raw(0x1000, &[Section { tag: 0x0001, data: vec![0x41; 16] }]).is_err());
+        assert!(build_raw(
+            0x10000,
+            &[
+                Section { tag: 0x0002, data: vec![1; 6] },
+                Section { tag: 0x0002, data: vec![2; 6] },
+            ]
+        )
+        .is_err());
+        // 本仓新增字段必须显式拒绝，绝不静默丢弃
+        assert!(build_raw(
+            0x10000,
+            &[Section { tag: 0x0102, data: vec![0x5a; 16] }]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rtl1_format_is_not_regressed_by_raw_layout() {
+        let data = b"TYZDD0046AB9\0".to_vec();
+        let image = build(
+            MODEL_TYFZA1,
+            0,
+            &[Section { tag: 0x0010, data: data.clone() }],
+        )
+        .unwrap();
+        assert_eq!(&image[0..8], MAGIC);
+        assert_eq!(image.len(), IMAGE_SIZE);
+        assert!(summary(&image).is_ok());
+        // 同一组字段下两种格式的产物确实不同
+        let raw = build_raw(IMAGE_SIZE, &[Section { tag: 0x0010, data }]).unwrap();
+        assert_ne!(&image[0..0x30], &raw[0..0x30]);
+    }
+
+    #[test]
+    fn output_format_parse() {
+        assert_eq!(OutputFormat::parse("rtl1").unwrap(), OutputFormat::RtlFact1);
+        assert_eq!(OutputFormat::parse("RTLFACT1").unwrap(), OutputFormat::RtlFact1);
+        assert_eq!(OutputFormat::parse("raw").unwrap(), OutputFormat::UpstreamRaw);
+        assert_eq!(OutputFormat::parse("upstream").unwrap(), OutputFormat::UpstreamRaw);
+        assert!(OutputFormat::parse("bogus").is_err());
     }
 }

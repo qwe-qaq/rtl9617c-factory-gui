@@ -34,13 +34,31 @@ fn load_env(args: &[String]) -> Result<env::EnvSet, String> {
 fn run(args: &[String]) -> Result<String, String> {
     match args.first().map(|s| s.as_str()) {
         Some("build") => {
-            let model = arg_value(args, "--model")?;
+            let model_input = arg_value(args, "--model")?;
+            // 同时接受本仓短名与上游 11-13 之后的长机型名。
+            let model = profile::canonical(&model_input)?;
             let output = arg_value(args, "-o")?;
+            let format = match args.iter().position(|a| a == "--format") {
+                Some(i) => layout::OutputFormat::parse(
+                    args.get(i + 1).ok_or("--format requires <rtl1|raw>")?,
+                )?,
+                None => layout::OutputFormat::RtlFact1,
+            };
             let compact = args.iter().any(|a| a == "--compact");
+            // raw 格式严格对齐上游：固定 10 个字段、镜像大小由机型决定，
+            // 不支持紧凑镜像，也无法容纳本仓新增的 EEPROM / NV_CFG 段。
+            if format == layout::OutputFormat::UpstreamRaw {
+                if compact {
+                    return Err("--compact 仅适用于 --format rtl1；raw 格式的镜像大小由机型决定".into());
+                }
+                if args.iter().any(|a| a == "--pon-eeprom" || a == "--wifi-nvcfg") {
+                    return Err("raw 格式的字段表是上游固定的 10 个字段，无法容纳 PON_MODULE_EEPROM / WIFI_NV_CFG；请改用 --format rtl1".into());
+                }
+            }
             let env = load_env(args)?;
             let device = read_file(&arg_value(args, "--device")?)?;
             let image = ubi::parse(&device)?;
-            let mut extracted = profile::profile(&model)?(&env, &image)?;
+            let mut extracted = profile::profile(model)?(&env, &image)?;
             // 可选：pt1570 mtd3 的 NV_CFG —— 原样存档（0x0103）并组装 Wi-Fi 校准
             // （5G=wlan1=base+2、2G=wlan0=base+1，实机日志证据；DIFF 缺失补 0）
             let mut nvcfg_blob: Option<Vec<u8>> = None;
@@ -80,24 +98,35 @@ fn run(args: &[String]) -> Result<String, String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let model_id = profile::model_id(&model)?;
-            let (bin, entries) = if compact {
-                // 紧凑镜像（64 KiB，不含 FPGA）无法走 summary() 的 8 MiB 校验，
-                // 段表直接从段数据生成
-                let bin = layout::build_compact(model_id, generation, &sections)?;
-                let entries = layout::summarize_sections(&sections)?;
-                (bin, entries)
-            } else {
-                let bin = layout::build(model_id, generation, &sections)?;
-                let entries = layout::summary(&bin)?;
-                (bin, entries)
+            let model_id = profile::model_id(model)?;
+            let (bin, entries) = match (format, compact) {
+                // 上游 11-13 之后的纯固定偏移格式：大小按机型、无头无校验。
+                (layout::OutputFormat::UpstreamRaw, _) => {
+                    let size = profile::upstream_image_size(model)?;
+                    let bin = layout::build_raw(size, &sections)?;
+                    let entries = layout::summarize_raw(&sections)?;
+                    (bin, entries)
+                }
+                // 本仓紧凑镜像（64 KiB，不含 FPGA）无法走 summary() 的 8 MiB 校验，
+                // 段表直接从段数据生成。
+                (layout::OutputFormat::RtlFact1, true) => {
+                    let bin = layout::build_compact(model_id, generation, &sections)?;
+                    let entries = layout::summarize_sections(&sections)?;
+                    (bin, entries)
+                }
+                (layout::OutputFormat::RtlFact1, false) => {
+                    let bin = layout::build(model_id, generation, &sections)?;
+                    let entries = layout::summary(&bin)?;
+                    (bin, entries)
+                }
             };
             std::fs::write(&output, &bin)
                 .map_err(|e| format!("cannot write {output}: {e}"))?;
             let mut report = format!(
-                "factory image: {} ({} bytes{}) -> {}\n",
-                model,
+                "factory image: {} ({} bytes, format={}{}) -> {}\n",
+                model_input,
                 bin.len(),
+                format.as_str(),
                 if compact { ", compact (no FPGA)" } else { "" },
                 output
             );
@@ -110,12 +139,13 @@ fn run(args: &[String]) -> Result<String, String> {
             Ok(report)
         }
         Some("dump") => {
-            let model = arg_value(args, "--model")?;
+            let model_input = arg_value(args, "--model")?;
+            let model = profile::canonical(&model_input)?;
             let env = load_env(args)?;
             let device = read_file(&arg_value(args, "--device")?)?;
             let image = ubi::parse(&device)?;
-            let extracted = profile::profile(&model)?(&env, &image)?;
-            let mut report = format!("model: {} (id {})\n", model, profile::model_id(&model)?);
+            let extracted = profile::profile(model)?(&env, &image)?;
+            let mut report = format!("model: {} (id {})\n", model_input, profile::model_id(model)?);
             report.push_str(&format!(
                 "ubi: peb={} leb={} volumes={:?}\n",
                 image.peb_size,
@@ -157,7 +187,7 @@ fn run(args: &[String]) -> Result<String, String> {
             report.push_str(&format!("sections: {}\n", sections.len()));
             Ok(report)
         }
-        _ => Err("usage: rtl9617c-factory <build|dump> --model <tyfza1|pt1500-h10> --env <file> [--env2 <file>] --device <file> [-o <out.bin>]".into()),
+        _ => Err("usage: rtl9617c-factory <build|dump> --model <tyfza1|pt1500-h10|pt1570|pt1570-r10|tianyi-tyfza1-2p5g|youhua-pt1500-h10-ct-2p5g> --env <file> [--env2 <file>] --device <file> [-o <out.bin>] [--format <rtl1|raw>] [--compact] [--pon-eeprom <file>] [--wifi-nvcfg <file>]".into()),
     }
 }
 

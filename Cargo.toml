@@ -1,9 +1,9 @@
 [package]
 name = "rtl9617c-factory"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-2.0-only"
-description = "RTL9617C factory image tool - upstream CLI plus an egui GUI (Rust/egui port in the spirit of h3c-factory)"
+description = "RTL9617C factory image tool - egui GUI + CLI + dual output formats (RTLFACT1 and upstream fixed-offset)"
 
 [lib]
 name = "rtl9617c_factory"
@@ -20,6 +20,8 @@ path = "src/bin/inspect.rs"
 [[bin]]
 name = "rtl9617c-factory-gui"
 path = "src/bin/gui/main.rs"
+# 无 GUI 依赖的环境下（cargo test --no-default-features）跳过该二进制
+required-features = ["gui"]
 
 [dependencies]
 lzokay-native = { version = "0.1", default-features = false, features = ["decompress"] }

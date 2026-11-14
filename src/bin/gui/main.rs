@@ -73,6 +73,14 @@ impl Model {
     }
 }
 
+/// 输出格式下拉框的显示文本。
+fn format_label(format: layout::OutputFormat) -> &'static str {
+    match format {
+        layout::OutputFormat::RtlFact1 => "RTLFACT1（含头/目录/CRC）",
+        layout::OutputFormat::UpstreamRaw => "上游 raw（固定偏移）",
+    }
+}
+
 /// 校准/镜像数据段在界面上的展示项（tag 与 layout::FIELDS 对应）。
 struct SectionRow {
     tag: u16,
@@ -143,8 +151,18 @@ struct BuildOut {
     saved_to: Option<PathBuf>,
 }
 
+/// 生成模式：本仓 RTLFACT1 完整 / 本仓 RTLFACT1 紧凑 / 上游固定偏移。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildMode {
+    Rtl1Full,
+    Rtl1Compact,
+    UpstreamRaw,
+}
+
 struct App {
     model: Model,
+    /// 输出格式，默认本仓增强的 RTLFACT1；可切换到上游 11-13 之后的 raw 格式。
+    format: layout::OutputFormat,
     env_path: Option<PathBuf>,
     env2_path: Option<PathBuf>,
     device_path: Option<PathBuf>,
@@ -167,6 +185,7 @@ impl App {
     fn new() -> App {
         App {
             model: Model::Tyfza1,
+            format: layout::OutputFormat::RtlFact1,
             env_path: None,
             env2_path: None,
             device_path: None,
@@ -256,13 +275,25 @@ impl App {
     }
 
     /// 生成镜像（等价于 CLI 的 build 流程），弹出保存对话框。
-    /// `compact=true` 时输出 64 KiB 紧凑镜像（布局/CRC 与完整镜像一致，不含 FPGA）。
-    fn build_image(&mut self, compact: bool) {
+    /// 三种模式：RTLFACT1 完整 8 MiB / RTLFACT1 紧凑 64 KiB / 上游 raw 固定偏移。
+    fn build_image(&mut self, mode: BuildMode) {
         let Some(Ok(ext)) = self.result.as_ref() else {
             return;
         };
+        let kind: &'static str = match mode {
+            BuildMode::UpstreamRaw => "上游 raw 格式 factory.bin",
+            BuildMode::Rtl1Compact => "64 KiB 紧凑镜像（不含 FPGA）",
+            BuildMode::Rtl1Full => "8 MiB factory.bin",
+        };
         let res = (|| -> Result<BuildOut, String> {
             let mut sections = profile::sections(&ext.extracted)?;
+            // 本仓新增段（EEPROM / NV_CFG）只有 RTLFACT1 的目录表能容纳；
+            // raw 格式字段表固定，必须显式报错而不是静默丢弃数据。
+            if mode == BuildMode::UpstreamRaw
+                && (self.pon_eeprom.is_some() || self.wifi_nvcfg.is_some())
+            {
+                return Err("上游 raw 格式的字段表是固定的 10 个字段，无法容纳 PON_MODULE_EEPROM / WIFI_NV_CFG；请切换回「RTLFACT1」格式".into());
+            }
             if let Some(data) = &self.pon_eeprom {
                 sections.push(layout::Section {
                     tag: 0x0102,
@@ -279,33 +310,54 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let (bin, entries) = if compact {
-                let bin = layout::build_compact(self.model.id(), generation, &sections)?;
-                let entries = layout::summarize_sections(&sections)?;
-                (bin, entries)
-            } else {
-                let bin = layout::build(self.model.id(), generation, &sections)?;
-                let entries = layout::summary(&bin)?;
-                (bin, entries)
+            let (bin, entries, name) = match mode {
+                // 上游 11-13 之后：全 0xFF + 固定偏移，镜像大小按机型，无头无校验。
+                BuildMode::UpstreamRaw => {
+                    let size = profile::upstream_image_size(self.model.key())?;
+                    let bin = layout::build_raw(size, &sections)?;
+                    let entries = layout::summarize_raw(&sections)?;
+                    (
+                        bin,
+                        entries,
+                        format!("factory-{}-upstream.bin", self.model.key()),
+                    )
+                }
+                // 紧凑镜像无法走 summary() 的 8 MiB 校验，段表直接从段数据生成。
+                BuildMode::Rtl1Compact => {
+                    let bin = layout::build_compact(self.model.id(), generation, &sections)?;
+                    let entries = layout::summarize_sections(&sections)?;
+                    (
+                        bin,
+                        entries,
+                        format!("factory-{}-compact.bin", self.model.key()),
+                    )
+                }
+                BuildMode::Rtl1Full => {
+                    let bin = layout::build(self.model.id(), generation, &sections)?;
+                    let entries = layout::summary(&bin)?;
+                    (
+                        bin,
+                        entries,
+                        format!("factory-{}.bin", self.model.key()),
+                    )
+                }
             };
             // 保存对话框被取消时不算错误：段表仍然展示，只是不落盘。
-            let name = if compact {
-                format!("factory-{}-compact.bin", self.model.key())
-            } else {
-                format!("factory-{}.bin", self.model.key())
-            };
             let saved_to = FileDialog::new().set_file_name(name).save_file();
             if let Some(target) = &saved_to {
                 std::fs::write(target, &bin).map_err(|e| format!("写入失败: {e}"))?;
             }
             Ok(BuildOut { entries, saved_to })
         })();
-        let kind = if compact { "64 KiB 紧凑镜像（不含 FPGA）" } else { "8 MiB factory.bin" };
+        let format_name = self.format.as_str();
         self.build_out = Some(match res {
             Ok(out) => {
                 self.status = match &out.saved_to {
-                    Some(p) => format!("已生成 {} -> {}", kind, p.display()),
-                    None => format!("已生成 {}（未保存，重新点生成可保存）", kind),
+                    Some(p) => format!("已生成 {}（{}） -> {}", kind, format_name, p.display()),
+                    None => format!(
+                        "已生成 {}（{}，未保存，重新点生成可保存）",
+                        kind, format_name
+                    ),
                 };
                 Ok(out)
             }
@@ -340,19 +392,57 @@ impl App {
                     self.start_extract(&ctx);
                 }
             }
+            // 输出格式：本仓增强的 RTLFACT1（默认） / 上游 11-13 之后的固定偏移。
+            let prev_format = self.format;
+            egui::ComboBox::from_id_salt("format_select")
+                .width(165.0)
+                .selected_text(format_label(self.format))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.format,
+                        layout::OutputFormat::RtlFact1,
+                        format_label(layout::OutputFormat::RtlFact1),
+                    );
+                    ui.selectable_value(
+                        &mut self.format,
+                        layout::OutputFormat::UpstreamRaw,
+                        format_label(layout::OutputFormat::UpstreamRaw),
+                    );
+                });
+            if self.format != prev_format {
+                self.build_out = None;
+                self.status = match self.format {
+                    layout::OutputFormat::RtlFact1 =>
+                        "已切换输出格式：RTLFACT1（含头/目录/CRC，支持紧凑镜像与新增字段）".to_string(),
+                    layout::OutputFormat::UpstreamRaw =>
+                        "已切换输出格式：上游 raw（固定偏移、无校验，镜像大小按机型；EEPROM / NV_CFG 段不可用）".to_string(),
+                };
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ready = self.result.as_ref().map_or(false, |r| r.is_ok()) && !self.busy;
-                if ui
-                    .add_enabled(ready, egui::Button::new("生成 factory.bin…"))
-                    .clicked()
-                {
-                    self.build_image(false);
-                }
-                if ui
-                    .add_enabled(ready, egui::Button::new("导出紧凑镜像 (64 KiB)…"))
-                    .clicked()
-                {
-                    self.build_image(true);
+                match self.format {
+                    layout::OutputFormat::RtlFact1 => {
+                        if ui
+                            .add_enabled(ready, egui::Button::new("生成 factory.bin…"))
+                            .clicked()
+                        {
+                            self.build_image(BuildMode::Rtl1Full);
+                        }
+                        if ui
+                            .add_enabled(ready, egui::Button::new("导出紧凑镜像 (64 KiB)…"))
+                            .clicked()
+                        {
+                            self.build_image(BuildMode::Rtl1Compact);
+                        }
+                    }
+                    layout::OutputFormat::UpstreamRaw => {
+                        if ui
+                            .add_enabled(ready, egui::Button::new("生成上游格式 factory.bin…"))
+                            .clicked()
+                        {
+                            self.build_image(BuildMode::UpstreamRaw);
+                        }
+                    }
                 }
                 if self.busy {
                     ui.spinner();
